@@ -85,7 +85,16 @@ func run(args []string, lookup config.Lookup, stdout, stderr io.Writer) int {
 		"shutdown_timeout", cfg.ShutdownTimeout.String(),
 	)
 
-	if err := app.New(cfg, logger).Run(ctx); err != nil {
+	service, err := app.New(ctx, cfg, logger)
+	if err != nil {
+		// Storage the process cannot own at all: an unusable data directory or
+		// a database another process is already writing. The record names the
+		// failure, never the configured path.
+		logger.Error("pacapulse failed to start", "error", err)
+		return exitFailure
+	}
+
+	if err := service.Run(ctx); err != nil {
 		logger.Error("pacapulse stopped", "error", err)
 		return exitFailure
 	}

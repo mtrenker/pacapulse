@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/mtrenker/pacapulse/internal/config"
 	"github.com/mtrenker/pacapulse/internal/httpapi"
 	"github.com/mtrenker/pacapulse/internal/logging"
+	"github.com/mtrenker/pacapulse/internal/storage"
 )
 
 // testConfig loads the real configuration from a fixture environment, so the
@@ -24,6 +27,7 @@ func testConfig(t *testing.T, env map[string]string) config.Config {
 	base := map[string]string{
 		config.EnvBaseURL: "http://127.0.0.1:0",
 		config.EnvAddr:    "127.0.0.1:0",
+		config.EnvDataDir: t.TempDir(),
 	}
 	for k, v := range env {
 		base[k] = v
@@ -40,10 +44,15 @@ func startApp(t *testing.T, cfg config.Config, logs io.Writer) (*app.App, string
 	t.Helper()
 
 	logger := logging.New(logs, cfg.LogFormat, cfg.LogLevel)
-	service := app.New(cfg, logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+
+	service, err := app.New(ctx, cfg, logger)
+	if err != nil {
+		t.Fatalf("app.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = service.Close() })
 
 	result := make(chan error, 1)
 	go func() { result <- service.Run(ctx) }()
@@ -62,13 +71,23 @@ func startApp(t *testing.T, cfg config.Config, logs io.Writer) (*app.App, string
 func probe(t *testing.T, url string) int {
 	t.Helper()
 
+	status, _ := probeBody(t, url)
+	return status
+}
+
+func probeBody(t *testing.T, url string) (int, string) {
+	t.Helper()
+
 	resp, err := http.Get(url)
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s: %v", url, err)
+	}
+	return resp.StatusCode, string(body)
 }
 
 // TestServiceLifecycle covers the whole baseline contract end to end: the
@@ -134,6 +153,105 @@ func TestReadinessFailsWhileDraining(t *testing.T) {
 	}
 }
 
+// TestStorageIsAReadinessDependency proves the wiring an operator depends on:
+// a database the service will not serve from takes the instance out of the load
+// balancer without restarting an otherwise healthy process.
+func TestStorageIsAReadinessDependency(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	// A file that is not a database is what a damaged or misdirected volume
+	// looks like on startup.
+	if err := os.WriteFile(filepath.Join(dir, storage.DatabaseFileName), []byte("not a database"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	var logs bytes.Buffer
+	cfg := testConfig(t, map[string]string{config.EnvDataDir: dir})
+	_, base, _, _ := startApp(t, cfg, &logs)
+
+	if got := probe(t, base+httpapi.LivenessPath); got != http.StatusOK {
+		t.Errorf("liveness status = %d, want %d: the process must stay diagnosable", got, http.StatusOK)
+	}
+	status, body := probeBody(t, base+httpapi.ReadinessPath)
+	if status != http.StatusServiceUnavailable {
+		t.Errorf("readiness status = %d, want %d", status, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(body, `"`+app.StorageCheck+`"`) {
+		t.Errorf("readiness body = %s, want it to name the %q check", body, app.StorageCheck)
+	}
+
+	// Neither the probe response nor the operator log may describe the volume.
+	for _, forbidden := range []string{dir, storage.DatabaseFileName, "PRAGMA", "SELECT"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("readiness body contains %q: %s", forbidden, body)
+		}
+		if strings.Contains(logs.String(), forbidden) {
+			t.Errorf("log contains %q:\n%s", forbidden, logs.String())
+		}
+	}
+	if !strings.Contains(logs.String(), "database is unavailable") {
+		t.Errorf("the failure was not reported to the operator log:\n%s", logs.String())
+	}
+}
+
+// TestSecondWriterIsRefused covers the failure that must stop startup rather
+// than degrade it: another process already owns the database.
+func TestSecondWriterIsRefused(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	owner, err := storage.Open(storage.Options{Dir: dir})
+	if err != nil {
+		t.Fatalf("storage.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = owner.Close() })
+
+	var logs bytes.Buffer
+	cfg := testConfig(t, map[string]string{config.EnvDataDir: dir})
+	service, err := app.New(context.Background(), cfg, logging.New(&logs, cfg.LogFormat, cfg.LogLevel))
+	if !errors.Is(err, storage.ErrLocked) {
+		if service != nil {
+			_ = service.Close()
+		}
+		t.Fatalf("app.New() error = %v, want %v", err, storage.ErrLocked)
+	}
+	if strings.Contains(err.Error(), dir) {
+		t.Errorf("the startup failure names the data directory: %v", err)
+	}
+}
+
+// TestShutdownReleasesTheDatabase proves a terminated process leaves the volume
+// free for its replacement.
+func TestShutdownReleasesTheDatabase(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	cfg := testConfig(t, map[string]string{config.EnvShutdownTimeout: "5s"})
+	service, base, result, cancel := startApp(t, cfg, &logs)
+
+	if got := probe(t, base+httpapi.ReadinessPath); got != http.StatusOK {
+		t.Fatalf("readiness status = %d, want %d", got, http.StatusOK)
+	}
+	if got := service.Storage().Version(); got == 0 {
+		t.Error("the database was not migrated during startup")
+	}
+
+	cancel()
+	if err := <-result; err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	// The lock is gone: a fresh instance can take the same directory.
+	next, err := storage.Open(storage.Options{Dir: cfg.DataDir})
+	if err != nil {
+		t.Fatalf("storage.Open() after shutdown error = %v, want the lock to be released", err)
+	}
+	if err := next.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
 // TestLogsExcludeConfiguredSecrets checks the running service, not just the
 // router: no configured value beyond the bound listen address may appear in the
 // logs, at any level.
@@ -169,7 +287,7 @@ func TestLogsExcludeConfiguredSecrets(t *testing.T) {
 	if written == "" {
 		t.Fatal("no log records were written; the privacy assertions would be vacuous")
 	}
-	for _, forbidden := range []string{baseURL, "secret-customer", "leaky", "127.0.0.1:0"} {
+	for _, forbidden := range []string{baseURL, "secret-customer", "leaky", "127.0.0.1:0", cfg.DataDir} {
 		if strings.Contains(written, forbidden) {
 			t.Errorf("log contains %q:\n%s", forbidden, written)
 		}

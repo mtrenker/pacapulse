@@ -22,6 +22,7 @@ LDFLAGS := -s -w -X $(PACKAGE)/internal/version.version=$(VERSION)
 # `make run PACAPULSE_LOG_LEVEL=debug`.
 PACAPULSE_BASE_URL ?= http://localhost:8080
 PACAPULSE_ADDR ?= :8080
+PACAPULSE_DATA_DIR ?= ./data
 PACAPULSE_LOG_LEVEL ?= info
 PACAPULSE_LOG_FORMAT ?= text
 
@@ -65,6 +66,7 @@ build: ## Build the service binary into bin/
 run: ## Run the service locally
 	PACAPULSE_BASE_URL='$(PACAPULSE_BASE_URL)' \
 	PACAPULSE_ADDR='$(PACAPULSE_ADDR)' \
+	PACAPULSE_DATA_DIR='$(PACAPULSE_DATA_DIR)' \
 	PACAPULSE_LOG_LEVEL='$(PACAPULSE_LOG_LEVEL)' \
 	PACAPULSE_LOG_FORMAT='$(PACAPULSE_LOG_FORMAT)' \
 	$(GO) run ./cmd/$(BINARY)

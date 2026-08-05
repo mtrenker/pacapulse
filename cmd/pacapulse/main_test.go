@@ -9,6 +9,7 @@ import (
 
 	"github.com/mtrenker/pacapulse/internal/config"
 	"github.com/mtrenker/pacapulse/internal/httpapi"
+	"github.com/mtrenker/pacapulse/internal/storage"
 	"github.com/mtrenker/pacapulse/internal/version"
 )
 
@@ -63,6 +64,43 @@ func TestConfigurationErrorHidesValues(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), config.EnvLogLevel) {
 		t.Errorf("stderr does not name the invalid variable: %q", stderr.String())
+	}
+}
+
+// TestUnusableStoragePreventsStartup covers the process boundary of the
+// single-writer rule: the binary reports a runtime failure rather than a
+// configuration one, exits without serving, and names neither the directory nor
+// the database.
+func TestUnusableStoragePreventsStartup(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	owner, err := storage.Open(storage.Options{Dir: dir})
+	if err != nil {
+		t.Fatalf("storage.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = owner.Close() })
+
+	var stdout, stderr bytes.Buffer
+	code := run(nil, config.Map(map[string]string{
+		config.EnvBaseURL: "https://pulse.example.com",
+		config.EnvAddr:    "127.0.0.1:0",
+		config.EnvDataDir: dir,
+		// The failure is logged, so the record has to be readable here.
+		config.EnvLogFormat: "text",
+	}), &stdout, &stderr)
+
+	if code != exitFailure {
+		t.Fatalf("exit code = %d, want %d (stdout: %s)", code, exitFailure, stdout.String())
+	}
+	output := stdout.String() + stderr.String()
+	if !strings.Contains(output, "failed to start") {
+		t.Errorf("output does not report the startup failure: %q", output)
+	}
+	for _, forbidden := range []string{dir, storage.DatabaseFileName, storage.LockFileName} {
+		if strings.Contains(output, forbidden) {
+			t.Errorf("output contains %q: %s", forbidden, output)
+		}
 	}
 }
 
