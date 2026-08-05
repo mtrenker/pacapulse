@@ -48,7 +48,7 @@ func openOnly(t *testing.T, dir string) *Database {
 }
 
 // query runs a single-value query against the live database.
-func query[T any](t *testing.T, db *Database, statement string) T {
+func query[T any](t *testing.T, db *Database, statement string, args ...any) T {
 	t.Helper()
 
 	handle, err := db.handle()
@@ -56,21 +56,21 @@ func query[T any](t *testing.T, db *Database, statement string) T {
 		t.Fatalf("handle() error = %v", err)
 	}
 	var value T
-	if err := handle.QueryRowContext(context.Background(), statement).Scan(&value); err != nil {
+	if err := handle.QueryRowContext(context.Background(), statement, args...).Scan(&value); err != nil {
 		t.Fatalf("%s: %v", statement, err)
 	}
 	return value
 }
 
 // exec runs a statement against the live database.
-func exec(t *testing.T, db *Database, statement string) {
+func exec(t *testing.T, db *Database, statement string, args ...any) {
 	t.Helper()
 
 	handle, err := db.handle()
 	if err != nil {
 		t.Fatalf("handle() error = %v", err)
 	}
-	if _, err := handle.ExecContext(context.Background(), statement); err != nil {
+	if _, err := handle.ExecContext(context.Background(), statement, args...); err != nil {
 		t.Fatalf("%s: %v", statement, err)
 	}
 }

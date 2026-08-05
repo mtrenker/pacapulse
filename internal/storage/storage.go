@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	// The CGO-free SQLite driver. It is a pure-Go translation of SQLite, which
@@ -69,6 +70,18 @@ type Options struct {
 type Database struct {
 	lock *lockFile
 	now  func() time.Time
+
+	// The write path. queue is the bounded backlog RecordPageView offers work
+	// to, stop is closed when shutdown begins, and writerDone is closed once
+	// the writer goroutine has finished its transaction and answered whatever
+	// was still queued. All three are created by Open and never replaced, so
+	// they are read without the mutex.
+	queue      chan *writeRequest
+	stop       chan struct{}
+	writerDone chan struct{}
+	// fail is the tests' transaction-stage failure injection. It is nil in
+	// production; see failureHook.
+	fail atomic.Pointer[failureHook]
 
 	mu      sync.Mutex
 	db      *sql.DB
@@ -137,12 +150,21 @@ func Open(opts Options) (*Database, error) {
 		now = time.Now
 	}
 
-	return &Database{
-		lock:    lock,
-		now:     now,
-		db:      db,
-		initErr: ErrUninitialized,
-	}, nil
+	database := &Database{
+		lock:       lock,
+		now:        now,
+		queue:      make(chan *writeRequest, writeQueueCapacity),
+		stop:       make(chan struct{}),
+		writerDone: make(chan struct{}),
+		db:         db,
+		initErr:    ErrUninitialized,
+	}
+	// The writer starts with the database, and Close is what stops it. It has
+	// nothing to do until Initialize has succeeded, because RecordPageView
+	// refuses to queue work against a database that is not yet usable.
+	go database.runWriter()
+
+	return database, nil
 }
 
 // createDatabaseFile creates an empty database with owner-only permissions.
@@ -279,9 +301,17 @@ func (d *Database) Version() int {
 	return d.version
 }
 
-// Close releases the database and the lock. It is safe to call more than once,
-// and it is what a failed startup calls too: the lock must not outlive the
-// process that took it, or the next start would refuse itself.
+// Close stops accepting writes, releases the database, and releases the lock.
+// It is safe to call more than once, and it is what a failed startup calls too:
+// the lock must not outlive the process that took it, or the next start would
+// refuse itself.
+//
+// The order is what makes shutdown safe. New page views are refused as soon as
+// closed is set; the writer is then told to stop and waited for, so a
+// transaction already in flight either commits or rolls back before the handle
+// it is using goes away, and every page view still queued is answered with
+// ErrClosed rather than acknowledged. Nothing uncommitted is ever reported as a
+// success.
 func (d *Database) Close() error {
 	d.mu.Lock()
 	if d.closed {
@@ -292,6 +322,9 @@ func (d *Database) Close() error {
 	db, lock := d.db, d.lock
 	d.db, d.lock = nil, nil
 	d.mu.Unlock()
+
+	close(d.stop)
+	<-d.writerDone
 
 	var closeErr error
 	if db != nil {

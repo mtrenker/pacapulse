@@ -48,6 +48,62 @@ var (
 	ErrUninitialized = errors.New("database is not initialized yet")
 )
 
+// Ingestion failures.
+//
+// These describe one offered page view rather than the database as a whole, so
+// none of them makes the service unready. ErrQueueFull and ErrUnavailable are
+// the retryable pair: the work was refused, not lost, and nothing was written.
+//
+// Like every other diagnostic in this package they name the field, the stage,
+// or the condition — never a site or event identifier, a path, a referrer, a
+// campaign value, a visitor key, or the SQL that discovered the problem.
+var (
+	// ErrInvalidPageView reports a page view that does not satisfy the
+	// ingestion contract. It is rejected before a transaction is opened.
+	ErrInvalidPageView = errors.New("page view does not satisfy the ingestion contract")
+	// ErrUnknownSite reports a page view for a site that does not exist, or was
+	// deleted while the page view was queued.
+	ErrUnknownSite = errors.New("page view references a site that does not exist")
+	// ErrQueueFull reports a writer that already has as much work waiting as it
+	// accepts. Retryable: the page view was refused rather than dropped, and
+	// the caller may offer it again.
+	ErrQueueFull = errors.New("write queue is full")
+	// ErrUnavailable reports a write SQLite could not accept now — a writer
+	// still busy after the configured timeout, or a full volume. Retryable, and
+	// nothing partial was committed.
+	ErrUnavailable = errors.New("database cannot accept writes right now")
+	// ErrWrite reports a write that failed for a reason the caller cannot act
+	// on. The transaction was rolled back, so no part of the event was kept.
+	ErrWrite = errors.New("write failed")
+)
+
+// lifecycleClasses are the sentinels a sticky initialization failure can carry,
+// most specific first.
+var lifecycleClasses = []error{
+	ErrClosed, ErrIntegrity, ErrConfiguration, ErrChecksum,
+	ErrSchemaNewer, ErrMigration, ErrOrphaned, ErrUninitialized,
+}
+
+// ingestionClass reduces a lifecycle failure to its bare class.
+//
+// The remembered reason a database is not served is written for an operator: it
+// names the stage that produced it and, for a driver failure, what SQLite said —
+// "file is not a database (26)". Readiness and the startup log are where that
+// belongs. A caller offering a page view learns only that the store is not
+// usable and which kind of unusable it is, so the detail is dropped here rather
+// than travelling out through the collection path.
+//
+// An unrecognised failure reduces to ErrUninitialized: whatever it was, the
+// database never became usable.
+func ingestionClass(err error) error {
+	for _, class := range lifecycleClasses {
+		if errors.Is(err, class) {
+			return class
+		}
+	}
+	return ErrUninitialized
+}
+
 // wrap builds a failure from its class, the lifecycle stage that produced it,
 // and a rendering of the cause that carries no filesystem path.
 func wrap(class error, stage string, cause error) error {

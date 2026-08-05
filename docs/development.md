@@ -1,9 +1,10 @@
 # Development
 
 This document covers the service baseline: how to configure, run, test, and
-package the PacaPulse binary, and the SQLite database lifecycle it owns. It does
-not describe analytics collection, reporting, retention, backup, authentication,
-or deployment — none of those exist yet.
+package the PacaPulse binary, the SQLite database lifecycle it owns, and the
+internal contract for recording one page view. It does not describe the public
+collector, reporting, retention, backup, authentication, or deployment — none of
+those exist yet.
 
 ## Prerequisites
 
@@ -203,6 +204,126 @@ not an improvised reversal.
 executed by the service. A test applies it to a scratch database and compares
 every resulting object against the migrated one, so the two cannot drift apart.
 
+### Recording a page view
+
+`storage.Database.RecordPageView` is the only way anything is written to the
+analytics tables. It is an internal Go API, not an endpoint: the browser
+collector that will call it belongs to a later issue.
+
+```go
+result, err := store.RecordPageView(ctx, storage.PageView{
+    SiteID:         siteID,          // canonical lowercase UUIDv4
+    EventID:        eventID,         // canonical lowercase UUIDv4, the idempotency key
+    ReceivedAt:     receivedAt,      // one server instant
+    Path:           "/pricing",      // ≤512 UTF-8 bytes, leading '/', no '?' or '#'
+    ReferrerHost:   "news.example.com", // optional, 1–253 bytes
+    CampaignSource: "newsletter",    // optional utm_*, ≤100 bytes each
+    CampaignMedium: "email",
+    CampaignName:   "spring-launch",
+    VisitorKey:     key,             // optional, exactly 32 bytes
+})
+```
+
+The input is **already sanitized**. There is no field for a client address, a
+user-agent header, a full referrer URL, or a query string, so deciding what a
+request means stays in the collector and only bounded canonical values reach
+SQLite. The zero value of every optional field means absent.
+
+Both identifiers must be canonical lowercase **UUIDv4** — 8-4-4-4-12 lowercase
+hex with the version nibble `4` and the variant nibble in `8`–`b`. The text form
+is the idempotency key, so an upper-case or brace-wrapped spelling of the same
+UUID would be a second event; and the data model specifies random v4, so the nil
+UUID and a v1 carrying a MAC address and a timestamp are refused rather than
+stored as if they were random.
+
+Two things the caller deliberately does not control:
+
+- **The aggregate day.** It is derived from `ReceivedAt` in UTC inside the
+  package, so a row can never be filed under a day its own timestamp does not
+  fall in. A request delayed across midnight belongs to the day the server
+  accepted it; there is no backdating path.
+- **The cardinality limits.** 2,000 paths, 500 referrer hosts, and 500 campaign
+  tuples per site and UTC day, fixed. A value the day already knows keeps its
+  exact row; a new one past the limit is counted in that family's single
+  reserved overflow row, which reports as **Other**. This bounds a site/day to
+  3,004 aggregate rows even under forged input.
+
+The whole page view is validated before a transaction is opened, so a rejected
+one has nothing to undo. Everything after that is one `BEGIN IMMEDIATE`
+transaction — ledger row, site and page totals, referrer and campaign totals
+when present, visitor-deduplication rows when a visitor key is — and the call
+returns only after it commits. **A successful return means the measurement is
+durable; a failed one means no part of it was kept.** Tests prove this by
+injecting a failure at each stage and comparing every table's counts.
+
+Repeating a `(SiteID, EventID)` pair is a success whose result reports
+`Duplicate`. The first accepted delivery stands, nothing is counted again, and a
+repeat carrying a different payload is discarded rather than merged.
+
+| Error | Meaning | Retryable |
+| --- | --- | --- |
+| `ErrInvalidPageView` | The input does not satisfy the contract | no |
+| `ErrUnknownSite` | The site does not exist, or was deleted while queued | no |
+| `ErrQueueFull` | The writer already has all the work it accepts | yes |
+| `ErrUnavailable` | SQLite is busy, or the volume is full | yes |
+| `ErrClosed`, `ErrUninitialized` | The store is not accepting writes | no |
+| `ErrWrite`, `ErrIntegrity` | The write failed and nothing was kept | no |
+| `ctx.Err()` | The caller gave up | — |
+
+Like every other diagnostic in the package, these name the field, the stage, or
+the condition and never the value: no site or event identifier, path, referrer,
+campaign value, visitor key, SQL text, or database path appears in an error a
+caller or the log can see.
+
+SQLite itself is the one source that does not obey that rule — its message for a
+failed statement names the table, the column, and the constraint. An ingestion
+error therefore reports the numeric result code instead (`sqlite result code
+3091`), which is enough to look the condition up and names nothing. The startup
+failure a database is refused for is reduced the same way: `RecordPageView`
+returns the bare class, while the stage and SQLite's own words stay in readiness
+and the startup log, where an operator reads them.
+
+`VisitorKey` is copied before the page view is queued. It is the caller's
+buffer, and a collection request that times out while queued is free to reuse
+it; sharing the slice would be both a data race and a way for one visitor's
+deduplication identity to become another's.
+
+### The writer queue and shutdown
+
+Every write is serialized through one worker goroutine that owns the transaction
+path, so SQLite's single writer is enforced inside the process as well as
+between processes by the advisory lock. Callers hand work to a **queue bounded
+at 256** page views.
+
+The bound is fixed rather than tunable, for the same reason the cardinality
+limits are. A full queue holds well under a megabyte of bounded records, and
+drains in roughly a second at one immediate transaction per event with
+`synchronous = FULL` — about as long as a collection request stays useful. A
+deeper queue would only accept work whose caller has already given up. When it
+is full, `RecordPageView` returns `ErrQueueFull` **immediately**: the data model
+requires backpressure rather than an unbounded wait or a silently dropped
+acknowledgement. The case that makes this visible is a busy writer, where a
+single attempt can wait out the 5s `busy_timeout` while the queue fills behind
+it.
+
+A caller whose context is cancelled while queued is abandoned without being
+executed, and gets its context error. Once the worker has started a transaction
+it runs to completion under the worker's own context: interrupting SQLite
+mid-statement costs the pool its one connection, and an event that has started
+is cheaper to finish than to tear down.
+
+`Close` is the shutdown path, and its order is what makes it safe:
+
+1. New page views are refused with `ErrClosed`.
+2. The worker is told to stop and waited for, so the transaction already in
+   flight reaches its commit or its rollback.
+3. Everything still queued is answered with `ErrClosed`. None of it was
+   executed, so none of it is acknowledged.
+4. The database is closed and the advisory lock released.
+
+No caller is left waiting on a writer that has stopped, no goroutine outlives
+`Close`, and nothing uncommitted is ever reported as a success.
+
 ### When the database is unusable
 
 Two failures stop the process, because there is nothing to run without them: an
@@ -342,10 +463,12 @@ statically linked database on a distroless base, and it is paid once rather than
 per site.
 
 The MVP targets 50–150 MiB idle memory and a 25–50m CPU request. The service
-sits well inside that, but it has no templates and no collection path yet, and
-the page cache, writer queue, and result sizes that will dominate a loaded
-process do not exist. This is a starting point for later comparison, not a claim
-about the finished service.
+sits well inside that, but the figures are for an idle process: it has no
+templates and no public collector yet, and the page cache and report result
+sizes that will dominate a loaded one do not exist. The writer queue is bounded
+at 256 bounded records, so it contributes well under a megabyte at saturation.
+This is a starting point for later comparison, not a claim about the finished
+service.
 
 ## Repository layout
 
@@ -357,7 +480,7 @@ internal/health    liveness and readiness state, dependency check registry
 internal/httpapi   router, probe handlers, privacy-safe request logging
 internal/logging   logger construction
 internal/server    bounded HTTP server and graceful shutdown
-internal/storage   SQLite lifecycle: lock, settings, migrations, integrity
+internal/storage   SQLite lifecycle and the serialized page-view write path
 internal/version   build identity
 ```
 
