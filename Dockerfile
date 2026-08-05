@@ -9,11 +9,9 @@ FROM ${BUILD_IMAGE} AS build
 
 WORKDIR /src
 
-# The module manifest is copied first so the download layer is reused while only
-# application code changes. There is no go.sum yet because the service has no
-# third-party dependencies; add it to this COPY and to .dockerignore alongside
-# the first one.
-COPY go.mod ./
+# The module manifests are copied first so the download layer is reused while
+# only application code changes.
+COPY go.mod go.sum ./
 RUN go mod download
 
 COPY cmd ./cmd
@@ -25,7 +23,9 @@ ARG VERSION=dev
 ARG TARGETOS
 ARG TARGETARCH
 
-# CGO is disabled to produce a static binary that runs on a distroless base.
+# CGO is disabled to produce a static binary that runs on a distroless base. The
+# SQLite driver is a pure-Go translation of SQLite for exactly this reason: the
+# database needs no shared library, and the runtime image needs no libc.
 # -trimpath removes local filesystem paths and -buildvcs=false keeps the build
 # independent of whether the build context carries a .git directory.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
@@ -52,6 +52,11 @@ COPY --from=build /out/pacapulse /usr/local/bin/pacapulse
 USER nonroot:nonroot
 
 ENV PACAPULSE_ADDR=:8080
+# The database lives on a mounted volume, not in the container's writable layer:
+# the image deliberately does not create /data, so a container started without a
+# volume fails loudly instead of writing analytics somewhere that disappears
+# with it.
+ENV PACAPULSE_DATA_DIR=/data
 EXPOSE 8080
 
 # The runtime image has no shell and no curl, so the binary probes itself. This

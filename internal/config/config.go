@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 const (
 	EnvAddr            = "PACAPULSE_ADDR"
 	EnvBaseURL         = "PACAPULSE_BASE_URL"
+	EnvDataDir         = "PACAPULSE_DATA_DIR"
 	EnvLogLevel        = "PACAPULSE_LOG_LEVEL"
 	EnvLogFormat       = "PACAPULSE_LOG_FORMAT"
 	EnvShutdownTimeout = "PACAPULSE_SHUTDOWN_TIMEOUT"
@@ -28,6 +30,7 @@ const (
 // Defaults applied when an optional variable is unset or empty.
 const (
 	DefaultAddr            = ":8080"
+	DefaultDataDir         = "./data"
 	DefaultLogLevel        = "info"
 	DefaultLogFormat       = FormatJSON
 	DefaultShutdownTimeout = 15 * time.Second
@@ -65,6 +68,11 @@ type Config struct {
 	// without a trailing slash. Later issues use it to build beacon snippets
 	// and OIDC redirect URIs.
 	BaseURL string
+	// DataDir is the directory the service owns its SQLite database and
+	// advisory lockfile in. Only the directory is configurable: the file names
+	// beneath it belong to the application, and no SQLite DSN is accepted from
+	// the environment.
+	DataDir string
 	// LogLevel is the minimum level emitted by the application logger.
 	LogLevel slog.Level
 	// LogFormat selects the structured log encoding.
@@ -163,6 +171,13 @@ func Load(lookup Lookup) (Config, error) {
 		}
 	}
 
+	dataDir := value(lookup, EnvDataDir, DefaultDataDir)
+	if err := validateDataDir(dataDir); err != nil {
+		fail(EnvDataDir, err.Error())
+	} else {
+		cfg.DataDir = filepath.Clean(dataDir)
+	}
+
 	level := strings.ToLower(value(lookup, EnvLogLevel, DefaultLogLevel))
 	if parsed, err := parseLevel(level); err != nil {
 		fail(EnvLogLevel, err.Error())
@@ -219,6 +234,20 @@ func validateAddr(addr string) error {
 	number, err := strconv.Atoi(port)
 	if err != nil || number < 0 || number > 65535 {
 		return fmt.Errorf("must use a numeric port between 0 and 65535")
+	}
+	return nil
+}
+
+// validateDataDir rejects a path the service could never own its database in.
+// Whether the directory can actually be created, written to, and locked is
+// decided by storage at startup, where the answer is authoritative; repeating
+// the filesystem check here would only add a race.
+func validateDataDir(dir string) error {
+	if strings.ContainsRune(dir, 0) {
+		return fmt.Errorf("must be a filesystem path, for example /var/lib/pacapulse")
+	}
+	if filepath.Clean(dir) == string(filepath.Separator) {
+		return fmt.Errorf("must be a directory the service can own, not the filesystem root")
 	}
 	return nil
 }

@@ -41,9 +41,11 @@ decisions.
 
 ## Running the service
 
-The repository currently contains the service baseline: a Go binary that loads
-and validates its configuration, serves Kubernetes-shaped liveness and readiness
-probes, and shuts down gracefully. It does not collect or store analytics yet.
+The repository currently contains the service baseline and its storage
+foundation: a Go binary that loads and validates its configuration, creates and
+migrates its SQLite database under an exclusive single-writer lock, serves
+Kubernetes-shaped liveness and readiness probes, and shuts down gracefully. It
+does not collect or report analytics yet.
 
 ```console
 $ PACAPULSE_BASE_URL=http://localhost:8080 go run ./cmd/pacapulse
@@ -51,9 +53,11 @@ $ curl http://localhost:8080/healthz
 {"status":"alive"}
 ```
 
-`make` lists the development commands, and `make verify` runs everything a pull
-request is checked with. See [the development guide](docs/development.md) for
-configuration, the container build, and the local smoke test.
+The database is created under `./data` by default; `PACAPULSE_DATA_DIR` moves
+it. `make` lists the development commands, and `make verify` runs everything a
+pull request is checked with. See [the development guide](docs/development.md)
+for configuration, the storage lifecycle, the container build, and the local
+smoke test.
 
 ## Status
 

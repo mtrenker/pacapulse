@@ -3,6 +3,7 @@ package config_test
 import (
 	"errors"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.ShutdownTimeout != config.DefaultShutdownTimeout {
 		t.Errorf("ShutdownTimeout = %v, want %v", cfg.ShutdownTimeout, config.DefaultShutdownTimeout)
 	}
+	if want := filepath.Clean(config.DefaultDataDir); cfg.DataDir != want {
+		t.Errorf("DataDir = %q, want %q", cfg.DataDir, want)
+	}
 	if cfg.ReadHeaderTimeout <= 0 || cfg.ReadTimeout <= 0 || cfg.WriteTimeout <= 0 || cfg.IdleTimeout <= 0 {
 		t.Errorf("HTTP timeouts must all be bounded, got %+v", cfg)
 	}
@@ -49,6 +53,7 @@ func TestLoadReadsOverrides(t *testing.T) {
 	cfg, err := config.Load(config.Map(map[string]string{
 		config.EnvAddr:            "127.0.0.1:9000",
 		config.EnvBaseURL:         "https://pulse.example.com",
+		config.EnvDataDir:         "/var/lib/pacapulse/",
 		config.EnvLogLevel:        "DEBUG",
 		config.EnvLogFormat:       "Text",
 		config.EnvShutdownTimeout: "5s",
@@ -57,6 +62,9 @@ func TestLoadReadsOverrides(t *testing.T) {
 		t.Fatalf("Load() error = %v, want nil", err)
 	}
 
+	if cfg.DataDir != "/var/lib/pacapulse" {
+		t.Errorf("DataDir = %q, want the cleaned %q", cfg.DataDir, "/var/lib/pacapulse")
+	}
 	if cfg.Addr != "127.0.0.1:9000" {
 		t.Errorf("Addr = %q, want %q", cfg.Addr, "127.0.0.1:9000")
 	}
@@ -163,6 +171,14 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 			env:      merge(minimal(), map[string]string{config.EnvAddr: ":70000"}),
 			variable: config.EnvAddr,
 		},
+		"data directory at the filesystem root": {
+			env:      merge(minimal(), map[string]string{config.EnvDataDir: "/"}),
+			variable: config.EnvDataDir,
+		},
+		"data directory with a null byte": {
+			env:      merge(minimal(), map[string]string{config.EnvDataDir: "/var/lib/paca\x00pulse"}),
+			variable: config.EnvDataDir,
+		},
 		"unknown log level": {
 			env:      merge(minimal(), map[string]string{config.EnvLogLevel: "verbose"}),
 			variable: config.EnvLogLevel,
@@ -219,6 +235,7 @@ func TestValidationErrorDoesNotLeakValues(t *testing.T) {
 
 	_, err := config.Load(config.Map(map[string]string{
 		config.EnvBaseURL:         "https://pulse.example.com/?token=" + secret,
+		config.EnvDataDir:         "/" + secret + "\x00",
 		config.EnvLogLevel:        secret,
 		config.EnvLogFormat:       secret,
 		config.EnvShutdownTimeout: secret,
@@ -233,7 +250,7 @@ func TestValidationErrorDoesNotLeakValues(t *testing.T) {
 		t.Fatalf("error message leaked a configured value: %s", message)
 	}
 	for _, variable := range []string{
-		config.EnvAddr, config.EnvBaseURL, config.EnvLogLevel,
+		config.EnvAddr, config.EnvBaseURL, config.EnvDataDir, config.EnvLogLevel,
 		config.EnvLogFormat, config.EnvShutdownTimeout,
 	} {
 		if !strings.Contains(message, variable) {

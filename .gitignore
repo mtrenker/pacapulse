@@ -1,2 +1,5 @@
 /bin/
 /coverage.out
+# The local data directory: a development database, its write-ahead log, and the
+# advisory lockfile. Never commit analytics data.
+/data/
