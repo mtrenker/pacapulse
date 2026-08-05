@@ -39,6 +39,22 @@ for authentication and application-owned site authorization.
 See [the project vision](docs/vision.md) for the current scope and open design
 decisions.
 
+## Running the service
+
+The repository currently contains the service baseline: a Go binary that loads
+and validates its configuration, serves Kubernetes-shaped liveness and readiness
+probes, and shuts down gracefully. It does not collect or store analytics yet.
+
+```console
+$ PACAPULSE_BASE_URL=http://localhost:8080 go run ./cmd/pacapulse
+$ curl http://localhost:8080/healthz
+{"status":"alive"}
+```
+
+`make` lists the development commands, and `make verify` runs everything a pull
+request is checked with. See [the development guide](docs/development.md) for
+configuration, the container build, and the local smoke test.
+
 ## Status
 
 Planning and prototyping. Do not use PacaPulse for production analytics yet.

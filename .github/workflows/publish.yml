@@ -1,0 +1,94 @@
+# Publish the production image for a trusted revision.
+#
+# It triggers only on pushes to `main`, an event a fork cannot cause, and it is
+# the only workflow granted `packages: write`. Verification runs first in a job
+# without those permissions, so nothing is published from a revision that has
+# not passed the same checks a pull request runs.
+name: Publish
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ghcr.io/mtrenker/pacapulse
+
+jobs:
+  checks:
+    name: Checks
+    uses: ./.github/workflows/checks.yml
+    permissions:
+      contents: read
+
+  publish:
+    name: Publish SHA-tagged image to GHCR
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      # Required to attest what was built and where it came from.
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Only the full commit SHA is published. No mutable tag such as `latest`
+      # or `main` exists, so a deployment reference can never change meaning
+      # without the reference itself changing.
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          build-args: |
+            VERSION=${{ github.sha }}
+          # Buildx's inline attestations would turn the reference into an index
+          # with extra manifests. Provenance is attached separately below, in a
+          # form `gh attestation verify` can check, keeping the published
+          # artifact a plain image.
+          provenance: false
+          sbom: false
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Record the published reference
+        run: |
+          {
+            echo "### Published image"
+            echo
+            echo '```'
+            echo "${IMAGE_NAME}:sha-${GITHUB_SHA}"
+            echo "${IMAGE_NAME}@${DIGEST}"
+            echo '```'
+            echo
+            echo "Deploy by digest; the SHA tag is for human traceability."
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
