@@ -1,0 +1,36 @@
+version: "2"
+
+# The standard set plus a small number of linters that guard properties this
+# service cares about: closed response bodies, wrapped errors, and the security
+# checks that matter for a public, internet-facing binary.
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - gosec
+    - misspell
+    - nilerr
+    - revive
+    - unconvert
+    - usetesting
+  settings:
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - disableStutteringCheck
+  exclusions:
+    rules:
+      # gosec's heuristics for request URLs and embedded credentials fire on
+      # test fixtures that exist precisely to prove those inputs are handled.
+      - path: '_test\.go'
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+  settings:
+    gofmt:
+      simplify: true

@@ -1,0 +1,8 @@
+# Allowlist: everything is excluded, then the few paths the build needs are
+# added back. Anything new — local environment files, credentials, build
+# output — stays out of the build context by default rather than by memory.
+*
+!cmd/
+!internal/
+!go.mod
+!go.sum

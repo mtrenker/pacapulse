@@ -1,0 +1,24 @@
+# Pull-request verification.
+#
+# This uses `pull_request` rather than `pull_request_target`: a fork's code runs
+# with a read-only token and no access to repository secrets, and this workflow
+# publishes nothing. Pushes to `main` are verified by publish.yml instead, so a
+# merge is checked once rather than twice.
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Checks
+    uses: ./.github/workflows/checks.yml
+    permissions:
+      contents: read

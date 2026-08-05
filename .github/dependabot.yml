@@ -1,0 +1,23 @@
+# Actions and base images are pinned by commit SHA and digest so that a build
+# is reproducible and cannot be changed under us. Dependabot is what keeps those
+# pins from going stale, and it is the reason pinning is safe to insist on.
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
