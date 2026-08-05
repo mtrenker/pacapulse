@@ -44,11 +44,14 @@ browser beacon --------> collector --+
 
 The initial implementation should favor one statically deployable Go service,
 a single-writer SQLite database, server-rendered administration pages, and a
-small charting dependency. Collection and writes should be batched.
+small charting dependency. Collection writes may be batched when measurements
+justify it, while preserving per-event atomicity and acknowledgement. The
+accepted MVP persistence, aggregation, retention, and recovery contracts are
+recorded in the [analytics data model](architecture/data-model.md).
 
 Authentication belongs to an external OIDC provider such as Authentik. PacaPulse
-should retain only the stable OIDC subject needed to associate a login with its
-local organization and site grants.
+should key a login by its OIDC issuer and stable subject, retaining only the
+profile information needed for its local organization and site grants.
 
 ## Initial resource goals
 
@@ -71,9 +74,10 @@ These are design targets rather than guarantees:
 
 ## Open decisions
 
-- Raw-event retention and the permanent aggregate schema.
-- Exact visitor and session semantics across date boundaries.
+The MVP analytics data model resolves raw-event retention, aggregate structure,
+daily-visitor semantics, and SQLite backup/restore boundaries. Remaining open
+decisions are:
+
 - Log-import cursor and deduplication behavior.
 - Offline bot and optional geographic classification.
-- Backup and restore strategy for SQLite deployments.
 - Public API and tracker naming conventions.
