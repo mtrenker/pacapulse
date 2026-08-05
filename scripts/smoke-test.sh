@@ -33,7 +33,12 @@ step() { printf '\n==> %s\n' "$1"; }
 cleanup() {
   docker rm --force "$CONTAINER" >/dev/null 2>&1 || true
   docker rm --force "$EXPORT_CONTAINER" >/dev/null 2>&1 || true
-  rm -rf "$WORKDIR"
+  # The service creates its data directory owner-only and as the container's
+  # user, not this one, so this user cannot descend into it to delete it —
+  # which is the property the test just proved. Remove everything else and
+  # leave that directory to the temporary filesystem it lives in, rather than
+  # failing a passing run on its teardown.
+  rm -rf "$WORKDIR" 2>/dev/null || true
 }
 trap cleanup EXIT
 
