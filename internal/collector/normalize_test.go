@@ -1,6 +1,70 @@
 package collector
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
+
+func payloadJSON(t *testing.T, overrides map[string]string) []byte {
+	t.Helper()
+	members := map[string]json.RawMessage{
+		"v":        json.RawMessage("1"),
+		"site":     json.RawMessage(`"pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ"`),
+		"event_id": json.RawMessage(`"550e8400-e29b-41d4-a716-446655440000"`),
+		"path":     json.RawMessage(`"/"`),
+	}
+	for name, raw := range overrides {
+		members[name] = json.RawMessage(raw)
+	}
+	body, err := json.Marshal(members)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	return body
+}
+
+func TestPayloadVersionRequiresExactIntegerTokenOne(t *testing.T) {
+	if _, err := parsePayload(payloadJSON(t, nil)); err != nil {
+		t.Fatalf("integer token 1 rejected: %v", err)
+	}
+	for name, raw := range map[string]string{
+		"quoted numeric string": `"1"`,
+		"decimal":               "1.0",
+		"exponent":              "1e0",
+		"other integer":         "2",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parsePayload(payloadJSON(t, map[string]string{"v": raw})); err == nil {
+				t.Fatalf("version %s was accepted", raw)
+			}
+		})
+	}
+}
+
+func TestPayloadStringMembersRejectNullAndOtherWrongTypes(t *testing.T) {
+	for _, member := range []string{
+		"site", "event_id", "path", "referrer_host",
+		"utm_source", "utm_medium", "utm_campaign",
+	} {
+		for name, raw := range map[string]string{"null": "null", "object": `{}`} {
+			t.Run(member+"/"+name, func(t *testing.T) {
+				if _, err := parsePayload(payloadJSON(t, map[string]string{member: raw})); err == nil {
+					t.Fatalf("%s %s was accepted", member, raw)
+				}
+			})
+		}
+	}
+}
+
+func TestPayloadAllowsAbsentOptionalStringMembers(t *testing.T) {
+	payload, err := parsePayload(payloadJSON(t, nil))
+	if err != nil {
+		t.Fatalf("parsePayload() error = %v", err)
+	}
+	if payload.ReferrerHost != "" || payload.UTMSource != "" || payload.UTMMedium != "" || payload.UTMCampaign != "" {
+		t.Errorf("absent optionals became populated: %+v", payload)
+	}
+}
 
 func TestCanonicalization(t *testing.T) {
 	if got, ok := canonicalizePath("/docs/%7euser"); !ok || got != "/docs/%7Euser" {

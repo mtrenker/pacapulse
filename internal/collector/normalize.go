@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -40,7 +41,6 @@ func parsePayload(body []byte) (payload, error) {
 		return payload{}, fmt.Errorf("invalid payload")
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
-	decoder.UseNumber()
 	token, err := decoder.Token()
 	if err != nil || token != json.Delim('{') {
 		return payload{}, fmt.Errorf("invalid payload")
@@ -88,15 +88,17 @@ func parsePayload(body []byte) (payload, error) {
 	}
 
 	var out payload
-	var version json.Number
-	if err := json.Unmarshal(members["v"], &version); err != nil || version.String() != "1" {
+	// Comparing the raw token is deliberate. encoding/json accepts a quoted
+	// number when unmarshalling into json.Number, while the protocol permits
+	// only the JSON integer token 1 (not "1", 1.0, or 1e0).
+	if !bytes.Equal(bytes.TrimSpace(members["v"]), []byte("1")) {
 		return payload{}, fmt.Errorf("invalid payload")
 	}
 	out.Version = 1
 	for name, target := range map[string]*string{
 		"site": &out.Site, "event_id": &out.EventID, "path": &out.Path,
 	} {
-		if err := json.Unmarshal(members[name], target); err != nil {
+		if err := decodeJSONString(members[name], target); err != nil {
 			return payload{}, fmt.Errorf("invalid payload")
 		}
 	}
@@ -105,7 +107,7 @@ func parsePayload(body []byte) (payload, error) {
 		"utm_medium": &out.UTMMedium, "utm_campaign": &out.UTMCampaign,
 	} {
 		if raw, ok := members[name]; ok {
-			if err := json.Unmarshal(raw, target); err != nil {
+			if err := decodeJSONString(raw, target); err != nil {
 				return payload{}, fmt.Errorf("invalid payload")
 			}
 		}
@@ -124,6 +126,17 @@ func parsePayload(body []byte) (payload, error) {
 	}
 	out.Path = canonicalPath
 	return out, nil
+}
+
+// decodeJSONString rejects JSON null explicitly. Unmarshalling null into a
+// *string otherwise succeeds and leaves the target empty, which would turn a
+// present wrong-type optional member into an absent dimension.
+func decodeJSONString(raw json.RawMessage, target *string) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '"' {
+		return fmt.Errorf("not a JSON string")
+	}
+	return json.Unmarshal(trimmed, target)
 }
 
 func validCollectionKey(value string) bool {

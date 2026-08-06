@@ -28,17 +28,13 @@ func (c *fixedClock) Now() time.Time          { c.mu.Lock(); defer c.mu.Unlock()
 func (c *fixedClock) Advance(d time.Duration) { c.mu.Lock(); c.now = c.now.Add(d); c.mu.Unlock() }
 
 type fakeBoundary struct {
-	mu       sync.Mutex
-	sites    map[string]storage.CollectionSite
-	disabled map[string]bool
-	views    []storage.PageView
-	events   map[string]bool
+	mu     sync.Mutex
+	sites  map[string]storage.CollectionSite
+	views  []storage.PageView
+	events map[string]bool
 }
 
 func (f *fakeBoundary) ResolveCollectionSite(_ context.Context, key string) (storage.CollectionSite, error) {
-	if f.disabled[key] {
-		return storage.CollectionSite{}, storage.ErrUnknownSite
-	}
 	site, ok := f.sites[key]
 	if !ok {
 		return storage.CollectionSite{}, storage.ErrUnknownSite
@@ -115,16 +111,13 @@ func loadFixtures(t *testing.T) protocolFixtures {
 }
 
 func newFixtureHandler(fixtures protocolFixtures) (*Handler, *fakeBoundary, *fixedClock) {
-	boundary := &fakeBoundary{sites: make(map[string]storage.CollectionSite), disabled: make(map[string]bool), events: make(map[string]bool)}
+	boundary := &fakeBoundary{sites: make(map[string]storage.CollectionSite), events: make(map[string]bool)}
 	ids := []string{
 		"11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222",
 		"33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444",
 	}
 	for index, config := range []fixtureSite{fixtures.Site, fixtures.DNTOverrideSite, fixtures.DevelopmentSite, fixtures.DisabledSite} {
 		boundary.sites[config.CollectionKey] = storage.CollectionSite{ID: ids[index], CanonicalHost: config.CanonicalHost, AllowedHosts: config.AllowedHosts, CollectionEnabled: config.CollectionEnabled, CollectDNT: config.CollectDNT}
-		if !config.CollectionEnabled {
-			boundary.disabled[config.CollectionKey] = true
-		}
 	}
 	clock := &fixedClock{now: time.Date(2026, 3, 14, 23, 59, 59, 0, time.UTC)}
 	return New(Options{Resolver: boundary, Recorder: boundary, VisitorSecret: []byte(fixtureSecret), Clock: clock}), boundary, clock

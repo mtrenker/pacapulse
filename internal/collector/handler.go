@@ -78,10 +78,6 @@ func New(opts Options) *Handler {
 	}
 }
 
-// SourceLimiterEvictions returns the one intentionally unlabeled collector
-// metric. It reveals only aggregate limiter churn and no source or site key.
-func (h *Handler) SourceLimiterEvictions() uint64 { return h.sources.evictionCount() }
-
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method != http.MethodPost {
@@ -116,9 +112,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	// Optional dimensions fail closed to absence rather than rejecting the
-	// mandatory event. They are repeated after privacy and source gates before
-	// storage, as the processing-order contract requires.
+	// Protocol step 3 makes optional dimensions fail closed to absence rather
+	// than rejecting the mandatory event. Step 10 deliberately repeats this
+	// canonicalization after privacy and source gates, before storage.
 	if normalized, ok := normalizeReferrerHost(candidate.ReferrerHost); ok {
 		candidate.ReferrerHost = normalized
 	} else {
@@ -137,6 +133,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
+	// The production resolver filters disabled sites to ErrUnknownSite. Keep
+	// this check at the interface boundary as defense in depth for any future
+	// resolver implementation, while preserving the same silent response.
 	if !site.CollectionEnabled {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -173,6 +172,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Protocol step 10 repeats canonicalization at the final sanitized-value
+	// boundary; optional failures remain absence rather than event rejection.
 	path, ok := canonicalizePath(candidate.Path)
 	if !ok || !isCanonicalUUIDv4(candidate.EventID) {
 		w.WriteHeader(http.StatusBadRequest)
