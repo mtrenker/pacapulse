@@ -2,7 +2,7 @@
 
 Status: accepted architecture decision for [issue #2](https://github.com/mtrenker/pacapulse/issues/2) and the [`v0.1.0` MVP](https://github.com/mtrenker/pacapulse/issues/1).
 
-This document defines the SQLite persistence, visitor-estimation, aggregation, retention, migration, backup, and recovery contracts for the first useful PacaPulse analytics loop. It deliberately optimizes for understandable traffic trends rather than exact identification.
+This document defines the SQLite persistence, visitor-estimation, aggregation, retention, migration, backup, and recovery contracts for the first useful PacaPulse analytics loop. It deliberately optimizes for understandable traffic trends rather than exact identification. The public request, browser behavior, origin policy, and privacy gate are defined by the [MVP browser collection protocol](collection-protocol.md).
 
 The executable reference DDL is in [`data-model.sql`](data-model.sql). Production schema changes must still be delivered as ordered migrations; the reference file is an architecture artifact, not a migration runner.
 
@@ -43,17 +43,7 @@ Paths and campaign values can themselves contain personal information if a site 
 
 Sanitization happens before a write transaction. Rejected requests create no event, visitor key, aggregate, or request-body log.
 
-The collector processes a request in this order:
-
-1. Resolve an enabled site from its random public collection key.
-2. Enforce the site's allowed origins/hosts and request-size limits.
-3. If `Sec-GPC: 1` is present, return a successful no-collection response.
-4. If `DNT: 1` is present and the site's `collect_dnt` policy is false (the default), return a successful no-collection response.
-5. Validate and canonicalize the event ID, path, external referrer, and campaign values.
-6. Obtain a trustworthy client IP only through the configured ingress proxy boundary.
-7. Capture one server instant and derive both `received_at_ms` and its UTC day from it.
-8. Classify the user agent transiently and derive a visitor key for that same day when an IP is available.
-9. Execute the event transaction.
+The [browser collection protocol](collection-protocol.md#server-processing-order) owns the collector's normative gate and rate-limit order. This storage contract requires only that sanitization and privacy gates complete before the write transaction: rejected or suppressed requests create no event, visitor key, aggregate, or request-body log. The collector captures one server instant for both `received_at_ms` and UTC day, derives the optional visitor key from transient trustworthy inputs, and then executes the event transaction.
 
 The public collection key is an identifier, not a credential. Origin validation and deployment rate limits reduce accidental or unsophisticated pollution but cannot make a public browser collector immune to forged requests. Reports are insights, not an auditable billing source.
 
@@ -68,16 +58,16 @@ The beacon generates one random RFC 4122 UUIDv4 per page view without using cook
 - Take the browser URL's pathname only.
 - Require a valid path beginning with `/`; use `/` for the home page.
 - Reject literal `?` and `#` characters and cap the canonical UTF-8 representation at 512 bytes.
-- Preserve percent encoding consistently.
-- Do not merge `/pricing` and `/pricing/`; a site may assign them different semantics.
+- Require complete two-hex-digit percent escapes, uppercase their hex digits, and do not decode the escaped octet.
+- Do not merge `/pricing` and `/pricing/`; preserve repeated and trailing slashes because a site may assign them different semantics.
 - Never send or store the query or fragment.
 
 ### Referrers
 
-The external referrer comes from `document.referrer` in the beacon payload. The collector never treats the beacon request's HTTP `Referer` header as the external referrer; that header normally identifies the tracked page itself.
+The beacon parses an HTTP(S) `document.referrer` in the browser and sends only its hostname. A full referrer URL therefore never crosses the collection boundary. The collector never treats the beacon request's HTTP `Referer` header as the external referrer; the beacon suppresses that header and, without suppression, it would identify the tracked page rather than its external source.
 
-- Parse the payload's HTTP(S) referrer and keep only its hostname.
-- Normalize the hostname to lowercase IDNA ASCII, remove a final dot, and omit its port.
+- Accept only the payload's hostname field.
+- Normalize it to lowercase IDNA ASCII, remove a final dot, and omit its port.
 - Discard invalid referrers and hosts matching the site's configured host list.
 - Store no full URL, scheme, path, query, fragment, or user information.
 - Create referrer aggregate and visitor rows only for a valid external hostname.
@@ -95,18 +85,17 @@ Recognize only the exact lowercase URL parameter names:
 The beacon sends them as explicit campaign fields rather than forwarding a URL query. For each value:
 
 - require valid UTF-8;
-- trim surrounding Unicode whitespace;
-- normalize Unicode and lowercase it;
-- enforce a maximum of 100 UTF-8 bytes after normalization;
+- normalize Unicode to NFC, trim surrounding Unicode whitespace, and apply locale-independent Unicode lowercase conversion;
+- discard that campaign member if it exceeds 100 UTF-8 bytes after normalization, while retaining the page view;
 - safely render it as untrusted text.
 
-Missing members become empty strings. Create campaign aggregate and visitor rows only when at least one member is non-empty. Discard `utm_term`, `utm_content`, advertising click identifiers, duplicate/unknown query fields, and all other query values.
+Missing members become empty strings. A duplicated allowlisted query name is omitted as ambiguous. Create campaign aggregate and visitor rows only when at least one member is non-empty. Discard `utm_term`, `utm_content`, advertising click identifiers, unknown query fields, and all other query values.
 
 Campaign attribution applies only to the page view carrying those fields. The MVP does not persist attribution across pages, sessions, or days.
 
 ## Daily visitor derivation
 
-The deployment provides one stable random master secret of at least 32 bytes through a Kubernetes Secret. It never enters SQLite, logs, metrics, backups, or issue evidence.
+The deployment provides one stable random master secret containing at least 32 decoded bytes through a base64-encoded Kubernetes Secret value. It never enters SQLite, logs, metrics, backups, or issue evidence.
 
 Use HMAC-SHA256 and an unambiguous length-prefixed binary encoding:
 
@@ -126,8 +115,8 @@ visitor_key = HMAC-SHA256(
 
 ### Client IP
 
-- Trust forwarding headers only when the immediate peer is a configured trusted ingress proxy.
-- Parse with an IP-address type rather than string manipulation.
+- Trust `X-Forwarded-For` only when the immediate peer is a configured trusted ingress proxy. Ignore `Forwarded`, `X-Real-IP`, and all forwarding headers from an untrusted immediate peer.
+- Parse every chain member with an IP-address type rather than string manipulation, walk right to left past configured trusted proxies, and use the first untrusted address. A direct unproxied request uses its actual peer address.
 - Unmap IPv4-mapped IPv6 addresses and use the canonical 4- or 16-byte representation.
 - Use the full address transiently. Prefix truncation would merge too many unrelated visitors while the persisted output is already secret-keyed and day/site scoped.
 - If no trustworthy valid client IP is available, accept and count the page view but do not increment any visitor count.

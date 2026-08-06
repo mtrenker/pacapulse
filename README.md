@@ -3,8 +3,9 @@
 Lightweight, privacy-first web analytics for multiple sites.
 
 > [!IMPORTANT]
-> PacaPulse is in the planning stage. Its privacy model, architecture, and APIs
-> are being designed in public before implementation begins.
+> PacaPulse is under active MVP development. Its service and SQLite ingestion
+> foundation exist, but its public collector, administration, reports, and
+> production deployment are not complete.
 
 ## Why PacaPulse?
 
@@ -23,29 +24,31 @@ clients access only to their own analytics.
   storage for modest workloads.
 - **Explicit tenant boundaries:** users see only organizations and sites they
   are authorized to access.
-- **Safe extension points:** support custom events without allowing arbitrary
-  personal data collection.
+- **Bounded collection:** accept only documented page-view fields and reject
+  arbitrary properties that could carry personal data.
 
-## Initial direction
+## MVP direction
 
-PacaPulse is expected to combine two optional collection paths:
+The MVP uses a small, transparent browser beacon for ordinary page loads and
+explicit SPA navigation. It collects bounded page-view fields without cookies,
+browser storage, full URLs, or arbitrary event properties. Reverse-proxy log
+importing and custom events are post-MVP possibilities, not initial collection
+paths.
 
-1. Sanitized page-view aggregation from reverse-proxy access logs.
-2. A tiny browser beacon for SPA navigation and explicit custom events.
-
-The first deployment target is a single Go service backed by SQLite, with OIDC
-for authentication and application-owned site authorization.
-
-See [the project vision](docs/vision.md) for the current scope and open design
-decisions.
+The deployment target is one Go service backed by SQLite, with OIDC for
+authentication and application-owned site authorization. See the [project
+vision](docs/vision.md), [browser collection
+protocol](docs/architecture/collection-protocol.md), and [analytics data
+model](docs/architecture/data-model.md) for the accepted boundaries.
 
 ## Running the service
 
 The repository currently contains the service baseline and its storage
 foundation: a Go binary that loads and validates its configuration, creates and
-migrates its SQLite database under an exclusive single-writer lock, serves
-Kubernetes-shaped liveness and readiness probes, and shuts down gracefully. It
-does not collect or report analytics yet.
+migrates its SQLite database under an exclusive single-writer lock, and can
+atomically record sanitized page views through an internal bounded writer. It
+also serves Kubernetes-shaped liveness and readiness probes and shuts down
+gracefully. The public browser collector and reports are not implemented yet.
 
 ```console
 $ PACAPULSE_BASE_URL=http://localhost:8080 go run ./cmd/pacapulse
@@ -61,7 +64,8 @@ smoke test.
 
 ## Status
 
-Planning and prototyping. Do not use PacaPulse for production analytics yet.
+MVP implementation in progress. Do not use PacaPulse for production analytics
+yet.
 
 ## License
 
