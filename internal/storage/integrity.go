@@ -9,11 +9,16 @@ import (
 	sqlite "modernc.org/sqlite"
 )
 
-// SQLite primary result codes this package classifies on. They are part of
-// SQLite's stable public interface.
+// SQLite result codes this package classifies on. They are part of SQLite's
+// stable public interface.
 const (
+	resultBusy    = 5  // SQLITE_BUSY
 	resultCorrupt = 11 // SQLITE_CORRUPT
+	resultFull    = 13 // SQLITE_FULL
 	resultNotADB  = 26 // SQLITE_NOTADB
+	// resultConstraintForeignKey is an extended code: SQLITE_CONSTRAINT with
+	// the foreign-key sub-code.
+	resultConstraintForeignKey = 787 // SQLITE_CONSTRAINT_FOREIGNKEY
 )
 
 // classify maps a driver failure onto the class that describes it. A file that
@@ -29,6 +34,57 @@ func classify(err error) error {
 		}
 	}
 	return ErrConfiguration
+}
+
+// classifyWrite maps a driver failure during the event transaction.
+//
+// It differs from classify in its default and in the two runtime states the
+// data model calls out separately: a writer still busy after the configured
+// timeout and a full volume are retryable and leave the reports readable, while
+// corruption stops reads and writes alike. Anything else is a write that
+// failed, which the caller cannot do anything about beyond being told.
+func classifyWrite(err error) error {
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		switch sqliteErr.Code() & 0xff {
+		case resultCorrupt, resultNotADB:
+			return ErrIntegrity
+		case resultBusy, resultFull:
+			return ErrUnavailable
+		}
+	}
+	return ErrWrite
+}
+
+// isMissingSite reports whether err is the site foreign key failing, which is
+// how a page view for a site that was never created — or was deleted while the
+// page view waited — announces itself. It is the only foreign key the event
+// transaction can violate.
+func isMissingSite(err error) bool {
+	var sqliteErr *sqlite.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.Code() == resultConstraintForeignKey
+}
+
+// wrapWrite builds an ingestion failure from a driver error.
+//
+// It is wrap's stricter sibling, and the difference is who reads the result.
+// The lifecycle's diagnostics are for an operator holding the database, so
+// leaving SQLite's message intact is useful there. An ingestion error travels
+// back to whatever offered the page view, and SQLite's message names the table,
+// column, and constraint that failed — "cannot store REAL value in INTEGER
+// column daily_site_stats.page_views". That is schema detail a collection
+// caller has no business learning, so the cause is rendered as the numeric
+// result code alone: enough to look the condition up, and content-free.
+//
+// Causes that are not driver errors — a context error, a closed database — carry
+// no values and keep the ordinary rendering.
+func wrapWrite(stage string, err error) error {
+	class := classifyWrite(err)
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		return describe(class, stage, fmt.Sprintf("sqlite result code %d", sqliteErr.Code()))
+	}
+	return wrap(class, stage, err)
 }
 
 // quickCheck runs the startup integrity check. It is quick_check rather than
