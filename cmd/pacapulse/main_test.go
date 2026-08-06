@@ -52,8 +52,9 @@ func TestConfigurationErrorHidesValues(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := run(nil, config.Map(map[string]string{
-		config.EnvBaseURL:  "https://pulse.example.com",
-		config.EnvLogLevel: secret,
+		config.EnvBaseURL:       "https://pulse.example.com",
+		config.EnvLogLevel:      secret,
+		config.EnvVisitorSecret: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 	}), &stdout, &stderr)
 
 	if code != exitConfig {
@@ -87,7 +88,8 @@ func TestUnusableStoragePreventsStartup(t *testing.T) {
 		config.EnvAddr:    "127.0.0.1:0",
 		config.EnvDataDir: dir,
 		// The failure is logged, so the record has to be readable here.
-		config.EnvLogFormat: "text",
+		config.EnvLogFormat:     "text",
+		config.EnvVisitorSecret: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 	}), &stdout, &stderr)
 
 	if code != exitFailure {

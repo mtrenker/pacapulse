@@ -16,6 +16,9 @@ set -euo pipefail
 
 IMAGE="${IMAGE:-pacapulse:smoke}"
 BUILD="${BUILD:-1}"
+# Deterministic test-only 32-byte value. Production receives an independent
+# random secret from its secret manager.
+VISITOR_SECRET="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 # Bounds the wait for the container to answer probes, and the termination grace
 # period given to `docker stop`.
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-30}"
@@ -103,6 +106,7 @@ esac
 set +e
 secret_output="$(docker run --rm \
   -e PACAPULSE_BASE_URL=https://pulse.example.com \
+  -e PACAPULSE_VISITOR_SECRET="$VISITOR_SECRET" \
   -e PACAPULSE_LOG_LEVEL=not-a-level-and-a-secret \
   "$IMAGE" 2>&1)"
 secret_code=$?
@@ -125,6 +129,7 @@ chmod 0777 "$MOUNT"
 docker run --detach \
   --name "$CONTAINER" \
   --env PACAPULSE_BASE_URL=https://pulse.example.com \
+  --env PACAPULSE_VISITOR_SECRET="$VISITOR_SECRET" \
   --env PACAPULSE_DATA_DIR=/data/pacapulse \
   --volume "$MOUNT:/data" \
   --publish 127.0.0.1::8080 \
@@ -178,6 +183,7 @@ step "Rejecting a second writer"
 set +e
 second_output="$(docker run --rm \
   --env PACAPULSE_BASE_URL=https://pulse.example.com \
+  --env PACAPULSE_VISITOR_SECRET="$VISITOR_SECRET" \
   --env PACAPULSE_DATA_DIR=/data/pacapulse \
   --volume "$MOUNT:/data" \
   "$IMAGE" 2>&1)"
@@ -191,7 +197,7 @@ esac
 
 step "Checking log privacy"
 docker logs "$CONTAINER" >"$WORKDIR/logs.txt" 2>&1
-for forbidden in 'pulse.example.com' 'PACAPULSE_BASE_URL' '/data/pacapulse' 'User-Agent' 'curl/'; do
+for forbidden in 'pulse.example.com' 'PACAPULSE_BASE_URL' "$VISITOR_SECRET" '/data/pacapulse' 'User-Agent' 'curl/'; do
   if grep -qF "$forbidden" "$WORKDIR/logs.txt"; then
     fail "container logs contain '$forbidden'"
   fi

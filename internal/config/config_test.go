@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -11,9 +12,14 @@ import (
 	"github.com/mtrenker/pacapulse/internal/config"
 )
 
+const testVisitorSecret = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+
 // minimal is the smallest environment that starts the service.
 func minimal() map[string]string {
-	return map[string]string{config.EnvBaseURL: "https://pulse.example.com"}
+	return map[string]string{
+		config.EnvBaseURL:       "https://pulse.example.com",
+		config.EnvVisitorSecret: testVisitorSecret,
+	}
 }
 
 func TestLoadAppliesDefaults(t *testing.T) {
@@ -57,6 +63,7 @@ func TestLoadReadsOverrides(t *testing.T) {
 		config.EnvLogLevel:        "DEBUG",
 		config.EnvLogFormat:       "Text",
 		config.EnvShutdownTimeout: "5s",
+		config.EnvVisitorSecret:   testVisitorSecret,
 	}))
 	if err != nil {
 		t.Fatalf("Load() error = %v, want nil", err)
@@ -85,9 +92,10 @@ func TestLoadTreatsBlankValuesAsUnset(t *testing.T) {
 	// A Kubernetes ConfigMap key with no value arrives as an empty string; it
 	// should fall back to the default rather than fail validation.
 	cfg, err := config.Load(config.Map(map[string]string{
-		config.EnvBaseURL:  "  https://pulse.example.com  ",
-		config.EnvAddr:     "   ",
-		config.EnvLogLevel: "",
+		config.EnvBaseURL:       "  https://pulse.example.com  ",
+		config.EnvAddr:          "   ",
+		config.EnvLogLevel:      "",
+		config.EnvVisitorSecret: testVisitorSecret,
 	}))
 	if err != nil {
 		t.Fatalf("Load() error = %v, want nil", err)
@@ -113,7 +121,9 @@ func TestLoadNormalisesBaseURL(t *testing.T) {
 	for input, want := range tests {
 		t.Run(input, func(t *testing.T) {
 			t.Parallel()
-			cfg, err := config.Load(config.Map(map[string]string{config.EnvBaseURL: input}))
+			cfg, err := config.Load(config.Map(map[string]string{
+				config.EnvBaseURL: input, config.EnvVisitorSecret: testVisitorSecret,
+			}))
 			if err != nil {
 				t.Fatalf("Load(%q) error = %v, want nil", input, err)
 			}
@@ -205,11 +215,11 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			cfg, err := config.Load(config.Map(tc.env))
+			cfg, err := config.Load(config.Map(merge(map[string]string{config.EnvVisitorSecret: testVisitorSecret}, tc.env)))
 			if err == nil {
 				t.Fatalf("Load() error = nil, want a validation error")
 			}
-			if cfg != (config.Config{}) {
+			if !reflect.DeepEqual(cfg, config.Config{}) {
 				t.Errorf("Load() returned a populated config alongside an error: %+v", cfg)
 			}
 
@@ -234,12 +244,14 @@ func TestValidationErrorDoesNotLeakValues(t *testing.T) {
 	const secret = "s3cr3t-value-that-must-never-be-logged"
 
 	_, err := config.Load(config.Map(map[string]string{
-		config.EnvBaseURL:         "https://pulse.example.com/?token=" + secret,
-		config.EnvDataDir:         "/" + secret + "\x00",
-		config.EnvLogLevel:        secret,
-		config.EnvLogFormat:       secret,
-		config.EnvShutdownTimeout: secret,
-		config.EnvAddr:            secret,
+		config.EnvBaseURL:           "https://pulse.example.com/?token=" + secret,
+		config.EnvDataDir:           "/" + secret + "\x00",
+		config.EnvLogLevel:          secret,
+		config.EnvLogFormat:         secret,
+		config.EnvShutdownTimeout:   secret,
+		config.EnvVisitorSecret:     secret,
+		config.EnvTrustedProxyCIDRs: secret,
+		config.EnvAddr:              secret,
 	}))
 	if err == nil {
 		t.Fatal("Load() error = nil, want a validation error")
@@ -251,7 +263,8 @@ func TestValidationErrorDoesNotLeakValues(t *testing.T) {
 	}
 	for _, variable := range []string{
 		config.EnvAddr, config.EnvBaseURL, config.EnvDataDir, config.EnvLogLevel,
-		config.EnvLogFormat, config.EnvShutdownTimeout,
+		config.EnvLogFormat, config.EnvShutdownTimeout, config.EnvVisitorSecret,
+		config.EnvTrustedProxyCIDRs,
 	} {
 		if !strings.Contains(message, variable) {
 			t.Errorf("error message does not name %s: %s", variable, message)
@@ -266,8 +279,9 @@ func TestLoadReportsEveryProblemAtOnce(t *testing.T) {
 	t.Parallel()
 
 	_, err := config.Load(config.Map(map[string]string{
-		config.EnvLogLevel:  "verbose",
-		config.EnvLogFormat: "logfmt",
+		config.EnvLogLevel:      "verbose",
+		config.EnvLogFormat:     "logfmt",
+		config.EnvVisitorSecret: testVisitorSecret,
 	}))
 
 	var validation *config.ValidationError

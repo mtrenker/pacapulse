@@ -11,6 +11,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/mtrenker/pacapulse/internal/collector"
 	"github.com/mtrenker/pacapulse/internal/config"
 	"github.com/mtrenker/pacapulse/internal/health"
 	"github.com/mtrenker/pacapulse/internal/httpapi"
@@ -52,9 +53,16 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	}
 	registry.Register(StorageCheck, store.Check)
 
+	pageViews := collector.New(collector.Options{
+		Resolver:          store,
+		Recorder:          store,
+		VisitorSecret:     cfg.VisitorSecret,
+		TrustedProxyCIDRs: cfg.TrustedProxyCIDRs,
+	})
 	router := httpapi.NewRouter(httpapi.Options{
-		Logger: logger,
-		Health: registry,
+		Logger:    logger,
+		Health:    registry,
+		Collector: pageViews,
 	})
 
 	srv := server.New(server.Options{

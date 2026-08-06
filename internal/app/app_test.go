@@ -25,9 +25,10 @@ func testConfig(t *testing.T, env map[string]string) config.Config {
 	t.Helper()
 
 	base := map[string]string{
-		config.EnvBaseURL: "http://127.0.0.1:0",
-		config.EnvAddr:    "127.0.0.1:0",
-		config.EnvDataDir: t.TempDir(),
+		config.EnvBaseURL:       "http://127.0.0.1:0",
+		config.EnvAddr:          "127.0.0.1:0",
+		config.EnvDataDir:       t.TempDir(),
+		config.EnvVisitorSecret: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 	}
 	for k, v := range env {
 		base[k] = v
