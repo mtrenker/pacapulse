@@ -1,10 +1,9 @@
 # Development
 
-This document covers the service baseline: how to configure, run, test, and
-package the PacaPulse binary, the SQLite database lifecycle it owns, and the
-internal contract for recording one page view. It does not describe the public
-collector, reporting, retention, backup, authentication, or deployment — none of
-those exist yet.
+This document covers how to configure, run, test, and package the PacaPulse
+binary, the SQLite lifecycle, the strict public page-view collector, and the
+internal page-view storage contract. Reporting, retention, backup,
+authentication, deployment, and the browser asset do not exist yet.
 
 ## Prerequisites
 
@@ -47,7 +46,8 @@ $ make run
 Or without Make:
 
 ```console
-$ PACAPULSE_BASE_URL=http://localhost:8080 go run ./cmd/pacapulse
+$ PACAPULSE_VISITOR_SECRET="$(openssl rand -base64 32)" \
+  PACAPULSE_BASE_URL=http://localhost:8080 go run ./cmd/pacapulse
 ```
 
 ## Configuration
@@ -64,6 +64,8 @@ once.
 | `PACAPULSE_LOG_LEVEL` | no | `info` | One of `debug`, `info`, `warn`, `error`. |
 | `PACAPULSE_LOG_FORMAT` | no | `json` | One of `json`, `text`. |
 | `PACAPULSE_SHUTDOWN_TIMEOUT` | no | `15s` | Grace period for in-flight requests after a termination signal. Must be positive and at most `25s`, which keeps it below the Kubernetes default 30s termination grace period. |
+| `PACAPULSE_VISITOR_SECRET` | yes | — | Strict RFC 4648 standard base64 that decodes to at least 32 random bytes. Used only in memory for transient source limiting and daily visitor estimates. |
+| `PACAPULSE_TRUSTED_PROXY_CIDRS` | no | blank | Comma-separated trusted proxy CIDR prefixes. Blank trusts no forwarding proxy; malformed lists prevent startup. |
 
 An unset variable and a variable set to whitespace are treated the same way, so
 an empty ConfigMap key falls back to the default instead of failing.
@@ -81,7 +83,7 @@ workload has yet justified making them tunable.
 A configuration error names the variable and the expectation, never the value:
 
 ```console
-$ go run ./cmd/pacapulse
+$ PACAPULSE_VISITOR_SECRET="$(openssl rand -base64 32)" go run ./cmd/pacapulse
 pacapulse: invalid configuration: PACAPULSE_BASE_URL is required and must be an absolute http or https URL, for example https://pulse.example.com
 ```
 
@@ -96,6 +98,7 @@ names rather than contents.
 | --- | --- |
 | `GET /healthz` | Liveness. `200 {"status":"alive"}` for as long as the process is serving. Never checks dependencies. |
 | `GET /readyz` | Readiness. `200 {"status":"ready"}`, or `503` with `{"status":"draining"}` during termination and `{"status":"unready","failed":["…"]}` when a dependency check fails. The database reports itself as `database`. |
+| `POST /api/v1/pageviews` | Strict browser page-view collection. Every response is empty and non-cacheable; accepted CORS is reflected only after site and origin approval. |
 
 The split matters operationally: a failing dependency must take the instance out
 of the load balancer, not make Kubernetes restart an otherwise healthy process.
@@ -207,8 +210,9 @@ every resulting object against the migrated one, so the two cannot drift apart.
 ### Recording a page view
 
 `storage.Database.RecordPageView` is the only way anything is written to the
-analytics tables. It is an internal Go API, not an endpoint: the browser
-collector that will call it belongs to a later issue.
+analytics tables. It is an internal Go API, not an endpoint: the strict public
+collector calls it only after origin, privacy, transient-input, limiting, and
+canonicalization gates have produced this sanitized shape.
 
 ```go
 result, err := store.RecordPageView(ctx, storage.PageView{
@@ -392,7 +396,8 @@ $ make image                 # build ghcr.io-shaped image locally as pacapulse:d
 $ make smoke                 # build it and run the full container smoke test
 $ IMAGE=ghcr.io/mtrenker/pacapulse:<sha> BUILD=0 scripts/smoke-test.sh
 $ docker run --rm -v "$PWD/data:/data" -p 8080:8080 \
-    -e PACAPULSE_BASE_URL=http://localhost:8080 pacapulse:dev
+    -e PACAPULSE_BASE_URL=http://localhost:8080 \
+    -e PACAPULSE_VISITOR_SECRET="$(openssl rand -base64 32)" pacapulse:dev
 ```
 
 The build is multi-stage. The build stage is `golang:1.26.5-alpine`, pinned by
@@ -462,10 +467,10 @@ The pure-Go SQLite translation is what the binary grew by; it is the price of a
 statically linked database on a distroless base, and it is paid once rather than
 per site.
 
-The MVP targets 50–150 MiB idle memory and a 25–50m CPU request. The service
-sits well inside that, but the figures are for an idle process: it has no
-templates and no public collector yet, and the page cache and report result
-sizes that will dominate a loaded one do not exist. The writer queue is bounded
+The MVP targets 50–150 MiB idle memory and a 25–50m CPU request. The figures
+above predate the public collector and describe an idle process with no
+templates; the limiter maps, page cache, and report result sizes that will
+dominate a loaded service are not represented. The writer queue is bounded
 at 256 bounded records, so it contributes well under a megabyte at saturation.
 This is a starting point for later comparison, not a claim about the finished
 service.
@@ -474,10 +479,11 @@ service.
 
 ```text
 cmd/pacapulse      process entry point: flags, exit codes, signal handling
-internal/app       wiring of config, storage, health, router, and server
+internal/app       wiring of config, storage, collector, health, router, and server
+internal/collector strict page-view validation, privacy, transient HMACs, and limits
 internal/config    environment loading and fail-fast validation
 internal/health    liveness and readiness state, dependency check registry
-internal/httpapi   router, probe handlers, privacy-safe request logging
+internal/httpapi   route registration, probe handlers, privacy-safe request logging
 internal/logging   logger construction
 internal/server    bounded HTTP server and graceful shutdown
 internal/storage   SQLite lifecycle and the serialized page-view write path

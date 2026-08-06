@@ -2,7 +2,11 @@ module github.com/mtrenker/pacapulse
 
 go 1.26.5
 
-require modernc.org/sqlite v1.56.0
+require (
+	golang.org/x/net v0.49.0
+	golang.org/x/text v0.35.0
+	modernc.org/sqlite v1.56.0
+)
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect

@@ -3,9 +3,9 @@
 Lightweight, privacy-first web analytics for multiple sites.
 
 > [!IMPORTANT]
-> PacaPulse is under active MVP development. Its service and SQLite ingestion
-> foundation exist, but its public collector, administration, reports, and
-> production deployment are not complete.
+> PacaPulse is under active MVP development. Its service, SQLite ingestion
+> foundation, and strict page-view collector exist, but its browser asset,
+> administration, reports, and production deployment are not complete.
 
 ## Why PacaPulse?
 
@@ -47,10 +47,12 @@ The repository currently contains the service baseline and its storage
 foundation: a Go binary that loads and validates its configuration, creates and
 migrates its SQLite database under an exclusive single-writer lock, and can
 atomically record sanitized page views through an internal bounded writer. It
-also serves Kubernetes-shaped liveness and readiness probes and shuts down
-gracefully. The public browser collector and reports are not implemented yet.
+serves the strict `POST /api/v1/pageviews` boundary plus Kubernetes-shaped
+liveness and readiness probes and shuts down gracefully. The browser asset and
+reports are not implemented yet.
 
 ```console
+$ export PACAPULSE_VISITOR_SECRET="$(openssl rand -base64 32)"
 $ PACAPULSE_BASE_URL=http://localhost:8080 go run ./cmd/pacapulse
 $ curl http://localhost:8080/healthz
 {"status":"alive"}

@@ -7,9 +7,11 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"strconv"
@@ -25,6 +27,9 @@ const (
 	EnvLogLevel        = "PACAPULSE_LOG_LEVEL"
 	EnvLogFormat       = "PACAPULSE_LOG_FORMAT"
 	EnvShutdownTimeout = "PACAPULSE_SHUTDOWN_TIMEOUT"
+	// #nosec G101 -- this is an environment variable name, not a credential.
+	EnvVisitorSecret     = "PACAPULSE_VISITOR_SECRET"
+	EnvTrustedProxyCIDRs = "PACAPULSE_TRUSTED_PROXY_CIDRS"
 )
 
 // Defaults applied when an optional variable is unset or empty.
@@ -80,6 +85,12 @@ type Config struct {
 	// ShutdownTimeout bounds in-flight request completion after a termination
 	// signal.
 	ShutdownTimeout time.Duration
+	// VisitorSecret is the decoded master secret used only for transient
+	// source limiting and daily visitor derivation.
+	VisitorSecret []byte
+	// TrustedProxyCIDRs identifies immediate peers whose X-Forwarded-For chain
+	// may be considered. An empty slice means no proxy is trusted.
+	TrustedProxyCIDRs []netip.Prefix
 
 	ReadHeaderTimeout time.Duration
 	ReadTimeout       time.Duration
@@ -204,10 +215,58 @@ func Load(lookup Lookup) (Config, error) {
 		cfg.ShutdownTimeout = parsed
 	}
 
+	secret, ok := lookup(EnvVisitorSecret)
+	decoded, secretErr := decodeVisitorSecret(secret)
+	switch {
+	case !ok || strings.TrimSpace(secret) == "":
+		fail(EnvVisitorSecret, "is required and must be strict standard base64 decoding to at least 32 bytes")
+	case secretErr != nil:
+		fail(EnvVisitorSecret, "must be strict standard base64 decoding to at least 32 bytes")
+	default:
+		cfg.VisitorSecret = decoded
+	}
+
+	trusted, err := parseTrustedProxyCIDRs(lookup)
+	if err != nil {
+		fail(EnvTrustedProxyCIDRs, "must be a comma-separated list of valid CIDR prefixes, or blank to trust no proxies")
+	} else {
+		cfg.TrustedProxyCIDRs = trusted
+	}
+
 	if len(problems) > 0 {
 		return Config{}, &ValidationError{Problems: problems}
 	}
 	return cfg, nil
+}
+
+// decodeVisitorSecret enforces canonical padded RFC 4648 standard base64 and
+// the minimum entropy-bearing byte length without retaining the encoded form.
+func decodeVisitorSecret(raw string) ([]byte, error) {
+	if raw == "" || raw != strings.TrimSpace(raw) || strings.ContainsAny(raw, "\r\n\t ") {
+		return nil, fmt.Errorf("invalid encoding")
+	}
+	decoded, err := base64.StdEncoding.Strict().DecodeString(raw)
+	if err != nil || len(decoded) < 32 || base64.StdEncoding.EncodeToString(decoded) != raw {
+		return nil, fmt.Errorf("invalid encoding")
+	}
+	return decoded, nil
+}
+
+func parseTrustedProxyCIDRs(lookup Lookup) ([]netip.Prefix, error) {
+	raw, ok := lookup(EnvTrustedProxyCIDRs)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	prefixes := make([]netip.Prefix, 0, len(parts))
+	for _, part := range parts {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(part))
+		if err != nil {
+			return nil, err
+		}
+		prefixes = append(prefixes, prefix.Masked())
+	}
+	return prefixes, nil
 }
 
 // value returns the trimmed variable, falling back to fallback when the

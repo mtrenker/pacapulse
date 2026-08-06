@@ -1,7 +1,7 @@
 // Package httpapi wires the HTTP surface of the service.
 //
-// The baseline exposes probe endpoints only. Later issues add the collector,
-// dashboard, and administration routes to the same router.
+// It registers probes and the strict collector boundary. Later issues add the
+// browser asset, dashboard, and administration routes to the same router.
 package httpapi
 
 import (
@@ -19,6 +19,7 @@ import (
 const (
 	LivenessPath  = "/healthz"
 	ReadinessPath = "/readyz"
+	PageViewsPath = "/api/v1/pageviews"
 )
 
 // DefaultCheckTimeout bounds readiness evaluation so a stuck dependency cannot
@@ -34,6 +35,9 @@ type Options struct {
 	// CheckTimeout bounds readiness evaluation. Zero selects
 	// DefaultCheckTimeout.
 	CheckTimeout time.Duration
+	// Collector handles the method-strict public page-view route. When nil the
+	// route is omitted, which keeps isolated probe tests lightweight.
+	Collector http.Handler
 }
 
 // NewRouter returns the service handler.
@@ -45,6 +49,11 @@ func NewRouter(opts Options) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+LivenessPath, liveness)
 	mux.HandleFunc("GET "+ReadinessPath, readiness(opts.Logger, opts.Health, opts.CheckTimeout))
+	if opts.Collector != nil {
+		// Register the path rather than only POST so the collector can provide
+		// the required empty, no-CORS 405 response for every other method.
+		mux.Handle(PageViewsPath, opts.Collector)
+	}
 
 	return observe(opts.Logger, mux)
 }
