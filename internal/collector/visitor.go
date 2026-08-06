@@ -19,7 +19,9 @@ func encode(parts ...[]byte) []byte {
 	out := make([]byte, 0, size)
 	var length [4]byte
 	for _, part := range parts {
-		// #nosec G115 -- protocol components are bounded to at most 512 bytes.
+		// #nosec G115 -- this private encoder receives only fixed context labels,
+		// canonical 36-byte site IDs, 10-byte days, canonical IP bytes, and fixed
+		// coarse classes, all far below uint32's maximum length.
 		binary.BigEndian.PutUint32(length[:], uint32(len(part)))
 		out = append(out, length[:]...)
 		out = append(out, part...)
