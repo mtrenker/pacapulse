@@ -1,0 +1,811 @@
+{
+  "protocol_version": 1,
+  "collection_key": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+  "site": {
+    "collection_key": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+    "canonical_host": "shop.example",
+    "allowed_hosts": [
+      "shop.example",
+      "www.shop.example"
+    ],
+    "collection_enabled": true,
+    "collect_dnt": false
+  },
+  "dnt_override_site": {
+    "collection_key": "pp_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+    "canonical_host": "privacy-aware.example",
+    "allowed_hosts": [
+      "privacy-aware.example"
+    ],
+    "collection_enabled": true,
+    "collect_dnt": true
+  },
+  "development_site": {
+    "collection_key": "pp_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+    "canonical_host": "localhost",
+    "allowed_hosts": [
+      "localhost",
+      "127.0.0.1",
+      "[::1]"
+    ],
+    "collection_enabled": true,
+    "collect_dnt": false
+  },
+  "disabled_site": {
+    "collection_key": "pp_EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE",
+    "canonical_host": "disabled.example",
+    "allowed_hosts": [
+      "disabled.example"
+    ],
+    "collection_enabled": false,
+    "collect_dnt": false
+  },
+  "browser_extraction": [
+    {
+      "name": "GPC suppresses before network activity",
+      "input": {
+        "kind": "initial",
+        "global_privacy_control": true,
+        "url": "https://shop.example/"
+      },
+      "expected": {
+        "send": false,
+        "network": false
+      }
+    },
+    {
+      "name": "DNT suppresses without explicit snippet override",
+      "input": {
+        "kind": "initial",
+        "do_not_track": "1",
+        "data_collect_dnt": null,
+        "url": "https://shop.example/"
+      },
+      "expected": {
+        "send": false,
+        "network": false
+      }
+    },
+    {
+      "name": "explicit browser DNT override emits one-way DNT field",
+      "input": {
+        "kind": "initial",
+        "do_not_track": "1",
+        "data_collect_dnt": "true",
+        "url": "https://privacy-aware.example/"
+      },
+      "expected": {
+        "send": true,
+        "payload_fields": {
+          "dnt": true
+        }
+      }
+    },
+    {
+      "name": "initial page minimizes URL and referrer before transport",
+      "input": {
+        "kind": "initial",
+        "url": "https://shop.example/Pricing/?utm_source=%20NewsLetter%20&utm_medium=EMAIL&utm_campaign=Spring%20Launch&customer=discard#details",
+        "document_referrer": "https://Search.Example/results?q=private"
+      },
+      "expected": {
+        "path": "/Pricing/",
+        "referrer_host": "search.example",
+        "utm_source": "newsletter",
+        "utm_medium": "email",
+        "utm_campaign": "spring launch",
+        "route_key_fields": [
+          "/Pricing/",
+          "newsletter",
+          "email",
+          "spring launch"
+        ]
+      }
+    },
+    {
+      "name": "percent escapes are uppercased but not decoded",
+      "input": {
+        "kind": "initial",
+        "url": "https://shop.example/docs/%7euser",
+        "document_referrer": ""
+      },
+      "expected": {
+        "path": "/docs/%7Euser",
+        "route_key_fields": [
+          "/docs/%7Euser",
+          "",
+          "",
+          ""
+        ]
+      }
+    },
+    {
+      "name": "duplicate allowlisted query key is omitted",
+      "input": {
+        "kind": "initial",
+        "url": "https://shop.example/?utm_source=first&utm_source=second&utm_medium=email",
+        "document_referrer": "https://www.shop.example/internal"
+      },
+      "expected": {
+        "path": "/",
+        "referrer_host": "www.shop.example",
+        "utm_medium": "email",
+        "route_key_fields": [
+          "/",
+          "",
+          "email",
+          ""
+        ],
+        "omitted": [
+          "utm_source"
+        ]
+      }
+    },
+    {
+      "name": "spa route omits original document referrer",
+      "input": {
+        "kind": "spa",
+        "url": "https://shop.example/account?tab=billing&utm_campaign=retention",
+        "document_referrer": "https://search.example/results"
+      },
+      "expected": {
+        "path": "/account",
+        "utm_campaign": "retention",
+        "route_key_fields": [
+          "/account",
+          "",
+          "",
+          "retention"
+        ],
+        "omitted": [
+          "referrer_host"
+        ]
+      }
+    },
+    {
+      "name": "prerender waits for activation",
+      "input": {
+        "kind": "initial",
+        "document_prerendering": true,
+        "lifecycle_event": "none"
+      },
+      "expected": {
+        "send": false,
+        "wait_for": "prerenderingchange"
+      }
+    },
+    {
+      "name": "prerender activation sends the current route once",
+      "input": {
+        "kind": "initial",
+        "document_prerendering": false,
+        "lifecycle_event": "prerenderingchange",
+        "url": "https://shop.example/activated",
+        "document_referrer": "https://search.example/results?q=private"
+      },
+      "expected": {
+        "send": true,
+        "path": "/activated",
+        "referrer_host": "search.example"
+      }
+    },
+    {
+      "name": "spa call during prerender is deferred",
+      "input": {
+        "kind": "spa",
+        "document_prerendering": true,
+        "url": "https://shop.example/prerender-route"
+      },
+      "expected": {
+        "send": false,
+        "wait_for": "prerenderingchange"
+      }
+    },
+    {
+      "name": "bfcache restoration creates a fresh no-referrer attempt",
+      "input": {
+        "kind": "pageshow",
+        "persisted": true,
+        "url": "https://shop.example/account",
+        "document_referrer": "https://search.example/results"
+      },
+      "expected": {
+        "send": true,
+        "fresh_event_id": true,
+        "reset_route_key": true,
+        "path": "/account",
+        "omitted": [
+          "referrer_host"
+        ]
+      }
+    },
+    {
+      "name": "second script injection is a no-op",
+      "input": {
+        "kind": "script_load",
+        "existing_pacapulse_version": 1
+      },
+      "expected": {
+        "send": false,
+        "install_api": false
+      }
+    },
+    {
+      "name": "consecutive equal route key is suppressed",
+      "input": {
+        "previous_route_key_fields": [
+          "/account",
+          "",
+          "",
+          "retention"
+        ],
+        "kind": "spa",
+        "url": "https://shop.example/account?ignored=changed&utm_campaign=retention#new-hash"
+      },
+      "expected": {
+        "send": false
+      }
+    }
+  ],
+  "server_requests": [
+    {
+      "name": "minimal accepted page view",
+      "request": {
+        "method": "POST",
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "550e8400-e29b-41d4-a716-446655440000",
+          "path": "/"
+        }
+      },
+      "expected": {
+        "status": 204,
+        "cors_origin": "https://shop.example",
+        "storage": "committed",
+        "visitor": "derived_when_address_is_trustworthy"
+      }
+    },
+    {
+      "name": "complete accepted page view",
+      "request": {
+        "method": "POST",
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://www.shop.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "b8b2f1a8-8df4-4b9b-8d3b-6f90aa5de102",
+          "path": "/pricing",
+          "referrer_host": "search.example",
+          "utm_source": "newsletter",
+          "utm_medium": "email",
+          "utm_campaign": "spring-launch"
+        }
+      },
+      "expected": {
+        "status": 204,
+        "cors_origin": "https://www.shop.example",
+        "storage": "committed"
+      }
+    },
+    {
+      "name": "same-site referrer hostname is discarded by the server",
+      "request": {
+        "method": "POST",
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "50d5da55-fd69-45ca-81aa-994d0b5119dc",
+          "path": "/internal",
+          "referrer_host": "www.shop.example"
+        }
+      },
+      "expected": {
+        "status": 204,
+        "cors_origin": "https://shop.example",
+        "storage": "committed",
+        "stored_referrer_host": null
+      }
+    },
+    {
+      "name": "duplicate is accepted without a second write",
+      "request": {
+        "method": "POST",
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "550e8400-e29b-41d4-a716-446655440000",
+          "path": "/different-first-write-still-wins"
+        }
+      },
+      "precondition": "minimal accepted page view has committed",
+      "expected": {
+        "status": 204,
+        "cors_origin": "https://shop.example",
+        "storage": "duplicate_no_op"
+      }
+    },
+    {
+      "name": "server-side GPC suppression",
+      "request": {
+        "method": "POST",
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "headers": {
+          "Sec-GPC": "1"
+        },
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "6a0c047a-b633-4fd4-9ea4-108f8027d480",
+          "path": "/privacy"
+        }
+      },
+      "expected": {
+        "status": 204,
+        "cors_origin": "https://shop.example",
+        "storage": "not_called",
+        "client_address": "not_processed",
+        "user_agent": "not_classified"
+      }
+    },
+    {
+      "name": "default DNT suppression",
+      "request": {
+        "method": "POST",
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "headers": {
+          "DNT": "1"
+        },
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "aab6421c-3da2-47ef-b37b-2d8bd0637d3d",
+          "path": "/privacy"
+        }
+      },
+      "expected": {
+        "status": 204,
+        "cors_origin": "https://shop.example",
+        "storage": "not_called"
+      }
+    },
+    {
+      "name": "explicit DNT override is accepted only by matching site policy",
+      "request": {
+        "method": "POST",
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://privacy-aware.example",
+        "headers": {
+          "DNT": "1"
+        },
+        "payload": {
+          "v": 1,
+          "site": "pp_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+          "event_id": "fb360285-5edb-411a-83a7-af9f8ee0e02b",
+          "path": "/privacy",
+          "dnt": true
+        }
+      },
+      "expected": {
+        "status": 204,
+        "cors_origin": "https://privacy-aware.example",
+        "storage": "committed"
+      }
+    },
+    {
+      "name": "stale browser DNT override is suppressed by server policy",
+      "request": {
+        "method": "POST",
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "50c81e15-0b6c-441a-8c65-0d3e773b05cd",
+          "path": "/privacy",
+          "dnt": true
+        }
+      },
+      "expected": {
+        "status": 204,
+        "cors_origin": "https://shop.example",
+        "storage": "not_called"
+      }
+    },
+    {
+      "name": "unknown site is silent",
+      "request": {
+        "method": "POST",
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+          "event_id": "88536861-90b3-4143-8305-9a1f0fa59bad",
+          "path": "/"
+        }
+      },
+      "expected": {
+        "status": 204,
+        "cors_origin": null,
+        "storage": "not_called"
+      }
+    },
+    {
+      "name": "disabled site is silent",
+      "request": {
+        "method": "POST",
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://disabled.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE",
+          "event_id": "e11de10f-4df0-4e4c-bc99-b2b948099f4b",
+          "path": "/"
+        }
+      },
+      "expected": {
+        "status": 204,
+        "cors_origin": null,
+        "storage": "not_called"
+      }
+    },
+    {
+      "name": "missing origin is silent",
+      "request": {
+        "method": "POST",
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": null,
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "209f146c-edf2-4ef7-97c3-06da03283ebd",
+          "path": "/"
+        }
+      },
+      "expected": {
+        "status": 204,
+        "cors_origin": null,
+        "storage": "not_called"
+      }
+    },
+    {
+      "name": "opaque null origin is silent",
+      "request": {
+        "method": "POST",
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "null",
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "064e88aa-25f9-4ba1-8d53-749434ef7974",
+          "path": "/"
+        }
+      },
+      "expected": {
+        "status": 204,
+        "cors_origin": null,
+        "storage": "not_called"
+      }
+    },
+    {
+      "name": "site rate limit is visible after origin approval",
+      "request": {
+        "method": "POST",
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "63a72cc9-50af-423b-86c4-c018f94c1384",
+          "path": "/"
+        }
+      },
+      "precondition": "the site token bucket is exhausted",
+      "expected": {
+        "status": 429,
+        "cors_origin": "https://shop.example",
+        "storage": "not_called",
+        "browser_retry": "once_same_body_and_event_id"
+      }
+    },
+    {
+      "name": "writer queue backpressure is visible and retryable",
+      "request": {
+        "method": "POST",
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "8d399973-dc50-41de-98e8-f0a1b730d3c7",
+          "path": "/"
+        }
+      },
+      "precondition": "the storage writer queue is full",
+      "expected": {
+        "status": 503,
+        "cors_origin": "https://shop.example",
+        "storage": "retryable_unavailable",
+        "browser_retry": "once_same_body_and_event_id"
+      }
+    },
+    {
+      "name": "storage unavailable is visible and retryable",
+      "request": {
+        "method": "POST",
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "5ca43adf-2280-4e80-b5fa-4a3b796dcb80",
+          "path": "/"
+        }
+      },
+      "precondition": "the initialized storage dependency is unavailable",
+      "expected": {
+        "status": 503,
+        "cors_origin": "https://shop.example",
+        "storage": "retryable_unavailable",
+        "browser_retry": "once_same_body_and_event_id"
+      }
+    },
+    {
+      "name": "disallowed origin is silent",
+      "request": {
+        "method": "POST",
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://copied-key.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "5cb9b25b-6c3f-4867-b5a1-d3b652379ec8",
+          "path": "/"
+        }
+      },
+      "expected": {
+        "status": 204,
+        "cors_origin": null,
+        "storage": "not_called"
+      }
+    },
+    {
+      "name": "oversized optional campaign is discarded while page view commits",
+      "request": {
+        "method": "POST",
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "7f7706a7-f3c3-4abe-b07e-f0b27820a591",
+          "path": "/campaign",
+          "generated_utm_campaign_utf8_bytes": 101
+        }
+      },
+      "expected": {
+        "status": 204,
+        "cors_origin": "https://shop.example",
+        "storage": "committed",
+        "stored_campaign": null
+      }
+    },
+    {
+      "name": "loopback HTTP development origin is allowed when configured",
+      "request": {
+        "method": "POST",
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "http://localhost:5173",
+        "payload": {
+          "v": 1,
+          "site": "pp_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+          "event_id": "499af4f5-55c3-4d15-8f6b-227ca13f9135",
+          "path": "/preview"
+        }
+      },
+      "expected": {
+        "status": 204,
+        "cors_origin": "http://localhost:5173",
+        "storage": "committed"
+      }
+    }
+  ],
+  "invalid_requests": [
+    {
+      "name": "unknown field is rejected",
+      "request": {
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "7304de09-9192-478e-92c9-e5cd26f56649",
+          "path": "/",
+          "screen_width": 1920
+        }
+      },
+      "expected": {
+        "status": 400,
+        "cors_origin": null,
+        "storage": "not_called"
+      }
+    },
+    {
+      "name": "full referrer URL has no protocol field",
+      "request": {
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "4b6fbc9f-1854-484f-a22c-5ea30c035cee",
+          "path": "/",
+          "referrer": "https://search.example/results?q=private"
+        }
+      },
+      "expected": {
+        "status": 400,
+        "cors_origin": null,
+        "storage": "not_called"
+      }
+    },
+    {
+      "name": "unsupported protocol version is rejected",
+      "request": {
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "payload": {
+          "v": 2,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "76d8ba1b-80aa-4472-bc34-99e6870e17f3",
+          "path": "/"
+        }
+      },
+      "expected": {
+        "status": 400,
+        "cors_origin": null,
+        "storage": "not_called"
+      }
+    },
+    {
+      "name": "noncanonical event UUID is rejected",
+      "request": {
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "550E8400-E29B-41D4-A716-446655440000",
+          "path": "/"
+        }
+      },
+      "expected": {
+        "status": 400,
+        "cors_origin": null,
+        "storage": "not_called"
+      }
+    },
+    {
+      "name": "invalid percent escape is rejected",
+      "request": {
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "5e27135a-0157-4be1-bf4d-6dbdf5cb615d",
+          "path": "/bad/%zz"
+        }
+      },
+      "expected": {
+        "status": 400,
+        "cors_origin": null,
+        "storage": "not_called"
+      }
+    },
+    {
+      "name": "oversized mandatory path is rejected",
+      "request": {
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "2c29a717-161c-48c6-9733-23763936c2cf",
+          "generated_path_utf8_bytes": 513
+        }
+      },
+      "expected": {
+        "status": 400,
+        "cors_origin": null,
+        "storage": "not_called"
+      }
+    },
+    {
+      "name": "wrong content type is rejected",
+      "request": {
+        "content_type": "application/json",
+        "origin": "https://shop.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "a783f074-8550-46ad-8dfb-daee9e79be07",
+          "path": "/"
+        }
+      },
+      "expected": {
+        "status": 415,
+        "cors_origin": null,
+        "storage": "not_called"
+      }
+    },
+    {
+      "name": "false DNT payload value is rejected",
+      "request": {
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "payload": {
+          "v": 1,
+          "site": "pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ",
+          "event_id": "e95a5002-041a-484e-bef6-30155989d3cb",
+          "path": "/",
+          "dnt": false
+        }
+      },
+      "expected": {
+        "status": 400,
+        "cors_origin": null,
+        "storage": "not_called"
+      }
+    },
+    {
+      "name": "duplicate JSON member is rejected",
+      "request": {
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "raw_body": "{\"v\":1,\"site\":\"pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ\",\"event_id\":\"441a2c6e-39d3-47f8-a3fd-9d8725fa7b8d\",\"path\":\"/first\",\"path\":\"/second\"}"
+      },
+      "expected": {
+        "status": 400,
+        "cors_origin": null,
+        "storage": "not_called"
+      }
+    },
+    {
+      "name": "malformed UTF-8 is rejected",
+      "request": {
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "raw_body_base64": "eyJ2IjoxLCJzaXRlIjoicHBfcTNEOXhLMm1XN2NONHJUOHZCNnlIMXNMNWFGMGpQelEiLCJldmVudF9pZCI6IjkxYmQ4NTU5LWYwZTYtNGNjOS1iNmVkLTliZDk2YzM1NWUyZCIsInBhdGgiOiIvYmFkL/8ifQ=="
+      },
+      "expected": {
+        "status": 400,
+        "cors_origin": null,
+        "storage": "not_called"
+      }
+    },
+    {
+      "name": "body limit is enforced before parsing",
+      "request": {
+        "content_type": "text/plain;charset=UTF-8",
+        "origin": "https://shop.example",
+        "generated_body_bytes": 4097
+      },
+      "expected": {
+        "status": 413,
+        "cors_origin": null,
+        "storage": "not_called"
+      }
+    }
+  ]
+}

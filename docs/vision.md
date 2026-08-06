@@ -5,16 +5,20 @@ multiple websites and client relationships. It should answer practical traffic
 and conversion questions while deliberately avoiding persistent visitor
 profiles.
 
-## Intended capabilities
+## MVP capabilities
 
 - Manage organizations, sites, users, and read-only client access.
-- Report page views, daily visitors, top pages, entry pages, and referrers.
-- Track constrained, explicitly configured custom events and goals.
-- Import sanitized traffic from reverse-proxy logs.
-- Support an optional small browser beacon for SPAs and custom events.
+- Install a small browser beacon for ordinary page loads and explicit SPA
+  navigation.
+- Report page views, daily visitors, daily trends, top pages, external referrer
+  hosts, and bounded campaign fields for 7, 30, and 90 days.
 - Authenticate users through OpenID Connect while keeping site grants local.
-- Export a site's data in a documented format.
-- Apply configurable raw-event and aggregate retention policies.
+- Apply the accepted 30-day event, roughly 48-hour visitor-key, and 13-month
+  aggregate retention policy.
+- Delete a site's configuration, grants, events, visitor state, and aggregates.
+
+Reverse-proxy importing, custom events and goals, entry-page/session semantics,
+and public export are possible later capabilities rather than MVP scope.
 
 ## Privacy boundaries
 
@@ -37,17 +41,17 @@ basis, retention choices, and agreements with clients.
 ## Initial architecture
 
 ```text
-reverse-proxy logs ----> importer ---+
-                                     +--> sanitizer --> SQLite --> dashboard
-browser beacon --------> collector --+
+browser beacon --> privacy gate and sanitizer --> SQLite --> dashboard
 ```
 
-The initial implementation should favor one statically deployable Go service,
-a single-writer SQLite database, server-rendered administration pages, and a
-small charting dependency. Collection writes may be batched when measurements
-justify it, while preserving per-event atomicity and acknowledgement. The
-accepted MVP persistence, aggregation, retention, and recovery contracts are
-recorded in the [analytics data model](architecture/data-model.md).
+The initial implementation favors one statically deployable Go service, a
+single-writer SQLite database, server-rendered administration pages, and a small
+charting dependency. Collection writes may be batched only when measurements
+justify it and per-event atomicity and acknowledgement remain intact. The
+accepted public transport is recorded in the [browser collection
+protocol](architecture/collection-protocol.md); persistence, aggregation,
+retention, and recovery are recorded in the [analytics data
+model](architecture/data-model.md).
 
 Authentication belongs to an external OIDC provider such as Authentik. PacaPulse
 should key a login by its OIDC issuer and stable subject, retaining only the
@@ -65,6 +69,8 @@ These are design targets rather than guarantees:
 
 ## Explicit non-goals for the first release
 
+- Reverse-proxy log importing.
+- Custom events, goals, session or entry-page semantics, and public export.
 - Advertising attribution or cross-site identities.
 - Session replay, heatmaps, or invasive fingerprinting.
 - Arbitrary unbounded event properties.
@@ -72,12 +78,10 @@ These are design targets rather than guarantees:
 - High-availability embedded storage.
 - ClickHouse-scale event ingestion.
 
-## Open decisions
+## Deferred decisions
 
-The MVP analytics data model resolves raw-event retention, aggregate structure,
-daily-visitor semantics, and SQLite backup/restore boundaries. Remaining open
-decisions are:
-
-- Log-import cursor and deduplication behavior.
-- Offline bot and optional geographic classification.
-- Public API and tracker naming conventions.
+The MVP analytics data model and browser collection protocol resolve the
+storage, visitor, retention, recovery, public naming, payload, origin, privacy,
+and retry boundaries needed by the first release. Reverse-proxy cursor
+semantics, offline bot or geographic classification, custom events, and public
+reporting/export APIs are deliberately deferred until after the MVP.
