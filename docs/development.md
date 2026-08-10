@@ -188,6 +188,13 @@ Explicit SPA route changes call `window.pacapulse?.("pageview")` after the
 router has committed and `location` reflects the new route. The beacon
 deliberately patches no history API, router, link, or observer.
 
+That call is matched exactly: one argument, equal to `"pageview"`. An unknown
+command, no command, or an extra argument this protocol version does not
+define is a silent no-op rather than a page view. A caller passing something
+extra is asking for behaviour that does not exist, and quietly recording an
+ordinary view instead would be the wrong thing under a name the caller thinks
+means more.
+
 ### Why the privacy gate runs first
 
 GPC and default DNT suppression happen before the script generates a UUID,
@@ -201,6 +208,46 @@ loudly.
 
 The same gate re-runs for prerender activation, bfcache restoration, and every
 explicit SPA call, because a visitor can change the setting mid-document.
+
+### Why requests belong to a lifecycle generation
+
+`pagehide` ends a generation. Every request carries the generation it started
+in, and a request may only schedule or perform a retry while that generation
+is still current.
+
+This matters because a bfcache restoration is not a continuation. The restored
+document has already re-run the privacy gate and taken its own fresh view, and
+a frozen page can sit in the bfcache for a long time — long enough for the
+visitor to turn GPC or DNT on before coming back. A request that was in flight
+before the freeze, or whose five-second timer only trips once frozen timers
+resume, must therefore not replay behind the restoration. A single "is the
+document frozen?" flag cannot express that: `pageshow` clears it, and the
+stale request then looks live again.
+
+For the same reason `pagehide` drops *every* pending retry rather than the
+most recently scheduled one. Two attempts can each be waiting out their
+jitter, and a single tracked timer handle would only cancel one of them.
+
+### Why the route key is JSON
+
+The in-document duplicate key is the canonical pathname plus the three
+normalized campaign values. It is serialized with `JSON.stringify`, not joined
+on a delimiter, because a campaign value can contain any character a delimiter
+might use. `utm_source=a\nb&utm_medium=c` and `utm_source=a&utm_medium=b\nc`
+are different routes; under a newline join they encode identically, and the
+second one is silently suppressed as a duplicate. An undercount produced by
+the encoding rather than by the visitor is the worst kind, because nothing
+about it looks wrong.
+
+### Why campaign trimming does not use `String.prototype.trim`
+
+The server trims with Go's `unicode.IsSpace`, and JavaScript's `trim` is not
+the same set. It differs at both ends: it keeps U+0085 (NEL), which Go
+removes, and it strips U+FEFF, which Go keeps. Either way the browser's route
+key and the server's stored value would describe different strings, so the
+asset trims with an explicit character class matching Go exactly. The 100-byte
+bound is then measured on the trimmed value, so padding the server would strip
+cannot push a legitimate campaign over the limit.
 
 ### Why a generic failure is never retried
 
@@ -224,6 +271,10 @@ The protocol caps the asset at 12 KiB uncompressed and 4 KiB compressed, and
 | Source | 12 KiB | `internal/beacon` Go test and the Node size test |
 | gzip (level 9) | 4 KiB | `internal/beacon` Go test and the Node size test |
 | Brotli (quality 11) | 4 KiB | the Node size test |
+
+gzip is measured by two encoders that disagree by a few bytes — Go's
+`compress/gzip`, which is what the service actually serves, and Node's zlib.
+Both are gated, so the tighter of the two is the real limit.
 
 Brotli is measured in Node because Go's standard library has no Brotli
 encoder. The service itself only offers identity and gzip, which is what
@@ -250,9 +301,17 @@ X-Content-Type-Options: nosniff
 Cross-Origin-Resource-Policy: cross-origin
 ```
 
-The two representations carry **different** strong validators. They differ
-byte for byte, so sharing one is how a shared cache ends up answering a gzip
-request with identity bytes labelled as compressed. Negotiation follows RFC
+Each representation's strong validator is derived from **its own bytes**, not
+from the source with a suffix to tell the two apart. A strong ETag identifies
+the exact bytes sent, and the gzip bytes are not a function of the source
+alone: a Go release that changed `compress/flate`'s output would otherwise
+serve different bytes under an unchanged validator, and every cache holding
+the old copy would keep it. Hashing what is actually sent makes that
+impossible by construction, and still gives the two representations the
+distinct validators a shared cache needs — sharing one is how a cache ends up
+answering a gzip request with identity bytes labelled as compressed.
+
+Negotiation follows RFC
 9110: identity is acceptable unless `identity;q=0` or a `*;q=0` without a more
 specific entry removes it, gzip is only sent when it was asked for by name or
 through a positive wildcard, quality values decide ties in the client's
