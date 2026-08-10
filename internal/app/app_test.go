@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mtrenker/pacapulse/internal/app"
+	"github.com/mtrenker/pacapulse/internal/beacon"
 	"github.com/mtrenker/pacapulse/internal/config"
 	"github.com/mtrenker/pacapulse/internal/httpapi"
 	"github.com/mtrenker/pacapulse/internal/logging"
@@ -292,5 +293,48 @@ func TestLogsExcludeConfiguredSecrets(t *testing.T) {
 		if strings.Contains(written, forbidden) {
 			t.Errorf("log contains %q:\n%s", forbidden, written)
 		}
+	}
+}
+
+// TestBeaconAssetIsServedByTheAssembledService proves the browser asset is
+// wired into the real binary's router, not only into the handler's own tests,
+// and that a tracked page gets the response contract it depends on.
+func TestBeaconAssetIsServedByTheAssembledService(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	_, base, _, _ := startApp(t, testConfig(t, nil), &logs)
+
+	req, err := http.NewRequest(http.MethodGet, base+httpapi.BeaconPath, nil)
+	if err != nil {
+		t.Fatalf("build the asset request: %v", err)
+	}
+	// Go's transport adds gzip negotiation and decodes transparently unless
+	// the header is set explicitly, which would hide what was really served.
+	req.Header.Set("Accept-Encoding", "identity")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET the asset: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read the asset: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if !bytes.Equal(body, beacon.Source()) {
+		t.Error("the served asset is not the embedded production source")
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/javascript; charset=utf-8" {
+		t.Errorf("Content-Type = %q", got)
+	}
+	if got := resp.Header.Get("Cross-Origin-Resource-Policy"); got != "cross-origin" {
+		t.Errorf("Cross-Origin-Resource-Policy = %q, want cross-origin", got)
+	}
+	if resp.Header.Get("ETag") == "" {
+		t.Error("the served asset has no validator")
 	}
 }

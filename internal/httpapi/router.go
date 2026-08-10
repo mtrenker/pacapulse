@@ -1,7 +1,8 @@
 // Package httpapi wires the HTTP surface of the service.
 //
-// It registers probes and the strict collector boundary. Later issues add the
-// browser asset, dashboard, and administration routes to the same router.
+// It registers probes, the public browser asset, and the strict collector
+// boundary. Later issues add the dashboard and administration routes to the
+// same router.
 package httpapi
 
 import (
@@ -20,6 +21,7 @@ const (
 	LivenessPath  = "/healthz"
 	ReadinessPath = "/readyz"
 	PageViewsPath = "/api/v1/pageviews"
+	BeaconPath    = "/beacon/v1.js"
 )
 
 // DefaultCheckTimeout bounds readiness evaluation so a stuck dependency cannot
@@ -38,6 +40,9 @@ type Options struct {
 	// Collector handles the method-strict public page-view route. When nil the
 	// route is omitted, which keeps isolated probe tests lightweight.
 	Collector http.Handler
+	// Beacon serves the public browser asset. When nil the route is omitted,
+	// on the same terms as Collector.
+	Beacon http.Handler
 }
 
 // NewRouter returns the service handler.
@@ -53,6 +58,11 @@ func NewRouter(opts Options) http.Handler {
 		// Register the path rather than only POST so the collector can provide
 		// the required empty, no-CORS 405 response for every other method.
 		mux.Handle(PageViewsPath, opts.Collector)
+	}
+	if opts.Beacon != nil {
+		// Registered without a method for the same reason: the asset handler
+		// owns its own 405, and it answers HEAD as well as GET.
+		mux.Handle(BeaconPath, opts.Beacon)
 	}
 
 	return observe(opts.Logger, mux)
