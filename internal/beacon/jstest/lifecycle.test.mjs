@@ -189,3 +189,50 @@ test("a 512-byte pathname is still collected", async () => {
   assert.equal(page.fetches.length, 1);
   assert.equal(page.payload(0).path.length, 512);
 });
+
+// The route key must encode its tuple injectively. Joining on a delimiter a
+// campaign value can itself contain lets two genuinely different routes
+// collide, and the second one is then suppressed as a duplicate — an
+// undercount produced by the encoding rather than by the visitor.
+test("distinct route tuples never collide, whatever the values contain", async () => {
+  // Same character sequence, different field boundaries.
+  const collidingPair = [
+    "https://shop.example/x?utm_source=a%0Ab&utm_medium=c",
+    "https://shop.example/x?utm_source=a&utm_medium=b%0Ac"
+  ];
+  const page = createPage({ url: collidingPair[0] });
+  await settle();
+  page.navigate(collidingPair[1]).pageview();
+  await settle();
+
+  assert.equal(page.fetches.length, 2, "two different campaign tuples were treated as one route");
+  assert.deepEqual(
+    [page.payload(0).utm_source, page.payload(0).utm_medium],
+    ["a\nb", "c"]
+  );
+  assert.deepEqual(
+    [page.payload(1).utm_source, page.payload(1).utm_medium],
+    ["a", "b\nc"]
+  );
+});
+
+test("delimiter-bearing tuples still suppress their own repeat", async () => {
+  const url = "https://shop.example/x?utm_source=a%0Ab&utm_medium=c";
+  const page = createPage({ url });
+  await settle();
+  page.pageview();
+  page.navigate(url).pageview();
+  await settle();
+
+  assert.equal(page.fetches.length, 1, "an identical delimiter-bearing route was not suppressed");
+});
+
+test("a quote or backslash in a campaign value does not collide either", async () => {
+  const page = createPage({ url: 'https://shop.example/y?utm_source=%22%2C%22&utm_medium=z' });
+  await settle();
+  assert.equal(page.fetches.length, 1);
+
+  page.navigate('https://shop.example/y?utm_source=%22&utm_medium=%22z').pageview();
+  await settle();
+  assert.equal(page.fetches.length, 2, "quoted campaign values collided");
+});

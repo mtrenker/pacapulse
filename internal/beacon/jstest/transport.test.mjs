@@ -154,3 +154,58 @@ test("a settled response cancels the timeout", async () => {
   assert.deepEqual(page.clock.pending, [], "the abort timer outlived the response");
   assert.equal(page.fetches[0].options.signal.aborted, false);
 });
+
+// The browser and the server must agree on where a campaign value begins and
+// ends, or the browser's route key and the server's stored value disagree.
+// Go trims unicode.IsSpace; String.prototype.trim differs at both ends, so
+// the asset uses the exact Go set instead.
+//
+// Every code point here is built from its number: a literal would be
+// invisible in review and easy to mangle in an editor.
+const cp = (n) => String.fromCodePoint(n);
+const encoded = (s) => encodeURIComponent(s);
+
+test("the campaign trim boundary matches the server's exactly", async () => {
+  const NEL = 0x85;
+  const cases = [
+    ["U+0085 leading and trailing", cp(NEL) + "news" + cp(NEL), "news"],
+    ["U+0085 interior is preserved", "a" + cp(NEL) + "b", "a" + cp(NEL) + "b"],
+    ["ordinary space", "  news  ", "news"],
+    ["ideographic space", cp(0x3000) + "news" + cp(0x3000), "news"],
+    ["mongolian vowel separator", cp(0x1680) + "news", "news"],
+    ["narrow no-break space", cp(0x202f) + "news", "news"],
+    ["mixed run", cp(NEL) + " \t" + cp(0xa0) + "news", "news"],
+    // Go keeps U+FEFF: it is a format character, not Unicode whitespace.
+    ["U+FEFF is not whitespace", cp(0xfeff) + "news", cp(0xfeff) + "news"]
+  ];
+
+  for (const [name, raw, want] of cases) {
+    const page = createPage({ url: `https://shop.example/?utm_source=${encoded(raw)}` });
+    await settle();
+    assert.equal(page.fetches.length, 1, `${name}: no request`);
+    assert.equal(page.payload(0).utm_source, want, name);
+  }
+});
+
+test("a campaign value of only U+0085 is omitted, like any empty one", async () => {
+  const page = createPage({ url: `https://shop.example/?utm_source=${encoded(cp(0x85).repeat(3))}&utm_medium=ok` });
+  await settle();
+
+  assert.equal("utm_source" in page.payload(0), false, "an all-whitespace value was sent");
+  assert.equal(page.payload(0).utm_medium, "ok");
+});
+
+// The 100-byte bound applies to the trimmed value, so padding that the server
+// would strip must not push a legitimate value over the limit.
+test("the byte bound is measured after trimming", async () => {
+  const padded = cp(0x85) + "x".repeat(100) + cp(0x85);
+  const page = createPage({ url: `https://shop.example/?utm_source=${encoded(padded)}` });
+  await settle();
+
+  assert.equal(page.payload(0).utm_source, "x".repeat(100), "trimmed padding counted against the bound");
+
+  const tooLong = cp(0x85) + "x".repeat(101) + cp(0x85);
+  const over = createPage({ url: `https://shop.example/?utm_source=${encoded(tooLong)}` });
+  await settle();
+  assert.equal("utm_source" in over.payload(0), false, "a 101-byte value survived trimming");
+});

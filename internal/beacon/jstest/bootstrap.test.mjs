@@ -122,6 +122,10 @@ test("an unrelated existing global is preserved and collection stops", async () 
   }
 });
 
+// The protocol makes unsupported commands, arguments, and event properties
+// silent no-ops. An extra argument is a caller asking for something this
+// version does not define, so recording an ordinary page view instead would
+// quietly do the wrong thing under a name the caller thinks means more.
 test("unsupported commands and arguments are silent no-ops", async () => {
   const page = createPage({});
   await settle();
@@ -131,9 +135,18 @@ test("unsupported commands and arguments are silent no-ops", async () => {
   for (const command of [undefined, null, "", "pageView", "event", 1, {}, ["pageview"], Symbol.iterator]) {
     assert.doesNotThrow(() => page.window.pacapulse(command));
   }
-  page.window.pacapulse("pageview", { extra: "ignored" }, 3);
+  assert.doesNotThrow(() => page.window.pacapulse());
+  assert.doesNotThrow(() => page.window.pacapulse("pageview", { extra: "ignored" }));
+  assert.doesNotThrow(() => page.window.pacapulse("pageview", undefined));
+  assert.doesNotThrow(() => page.window.pacapulse("pageview", 1, 2, 3));
   await settle();
 
-  // Only the one recognized command produced a request.
+  assert.equal(page.fetches.length, 1, "an unsupported call produced a page view");
+
+  // The one documented spelling still works, and the route was never marked
+  // by the rejected calls.
+  page.window.pacapulse("pageview");
+  await settle();
   assert.equal(page.fetches.length, 2);
+  assert.equal(page.payload(1).path, "/next");
 });

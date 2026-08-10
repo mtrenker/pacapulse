@@ -1,14 +1,12 @@
-/*! PacaPulse browser beacon, protocol v1. AGPL-3.0-only. Served byte for
- * byte as GET /beacon/v1.js with no build step in between, inside a hard
- * 12 KiB / 4 KiB compressed budget. Every rule below is explained in
- * docs/architecture/collection-protocol.md.
+/*! PacaPulse browser beacon, protocol v1. AGPL-3.0-only. Served byte for byte
+ * as GET /beacon/v1.js, no build step in between, inside a hard 12 KiB / 4 KiB
+ * compressed budget. Rationale: docs/development.md.
  */
 (function () {
   "use strict";
 
-  // A pre-existing global stops this instance before it reads the DOM, makes
-  // randomness, or reaches the network. A marked function already owns
-  // collection; an unrelated value belongs to the page.
+  // Another instance's marker or the page's own value stops this one here,
+  // before any DOM read, randomness, or network.
   if (window.pacapulse !== undefined) return;
 
   var win = window;
@@ -16,9 +14,8 @@
   var webcrypto = win.crypto;
 
   // A browser that cannot make the exact documented request sends nothing.
-  // There is no degraded transport and no insecure-randomness fallback.
-  var required = ["fetch", "Request", "AbortController", "AbortSignal", "URL",
-    "URLSearchParams", "TextEncoder", "Promise"];
+  var required = ("fetch Request AbortController AbortSignal URL " +
+    "URLSearchParams TextEncoder Promise").split(" ");
   for (var i = 0; i < required.length; i++) {
     if (typeof win[required[i]] !== "function") return;
   }
@@ -26,8 +23,7 @@
       (typeof webcrypto.randomUUID !== "function" &&
         typeof webcrypto.getRandomValues !== "function")) return;
 
-  // Everything configurable comes from this script's own tag, so no
-  // hostname is hard-coded. Malformed input stops silently.
+  // All configuration comes from this tag; malformed input stops silently.
   var script = doc.currentScript;
   if (!script || typeof script.getAttribute !== "function") return;
   var siteKey = script.getAttribute("data-site");
@@ -45,15 +41,19 @@
 
   var encoder = new win.TextEncoder();
   var CAMPAIGNS = ["utm_source", "utm_medium", "utm_campaign"];
+  // Exactly Go's unicode.IsSpace, which the server trims with; String.trim
+  // disagrees at both ends, keeping U+0085 and stripping U+FEFF.
+  var EDGES = "[\\t\\n\\v\\f\\r \\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]+";
+  var TRIM = new RegExp("^" + EDGES + "|" + EDGES + "$", "g");
 
-  // Ordinary memory that dies with the document; nothing is persisted.
+  // Ordinary memory that dies with the document.
   var routeKey = null; // last route accepted for delivery
   var awaitingActivation = false; // one prerenderingchange listener is armed
-  var retryTimer = 0; // at most one pending retry
-  var frozen = false; // set by pagehide, cleared by pageshow
+  var retryTimers = new Set(); // every pending retry, dropped at pagehide
+  var generation = 0; // bumped by pagehide; frozen work never resumes
 
   // Runs first on every attempt: before URL access, before a UUID exists,
-  // before any network. null suppresses collection.
+  // before any network activity. null suppresses collection.
   function privacyGate() {
     var nav = win.navigator;
     // GPC has no override, here or on the server.
@@ -70,14 +70,11 @@
 
   // location.pathname only; the full URL is never read for analytics.
   function canonicalPath(value) {
-    if (typeof value !== "string" || value.charAt(0) !== "/") return null;
-    if (value.indexOf("?") !== -1 || value.indexOf("#") !== -1) return null;
-    // Every % must begin a complete two-hex escape.
+    if (typeof value !== "string" || !/^\/[^?#]*$/.test(value)) return null;
+    // Every % must begin a complete two-hex escape, uppercased but never
+    // decoded, so /a%2Fb and /a/b stay distinct routes.
     if (/%(?![0-9A-Fa-f]{2})/.test(value)) return null;
-    // Uppercased but never decoded, so /a%2Fb and /a/b stay distinct routes.
-    var out = value.replace(/%[0-9A-Fa-f]{2}/g, function (hex) {
-      return hex.toUpperCase();
-    });
+    var out = value.replace(/%[0-9A-Fa-f]{2}/g, function (h) { return h.toUpperCase(); });
     return utf8Length(out) > 512 ? null : out;
   }
 
@@ -86,10 +83,11 @@
     var params = new win.URLSearchParams(search);
     var values = [];
     for (var n = 0; n < CAMPAIGNS.length; n++) {
-      // A repeat drops the dimension, not the view; toLowerCase is
-      // locale-independent, so one campaign is one aggregate row.
+      // A repeat drops the dimension, not the view.
       var all = params.getAll(CAMPAIGNS[n]);
-      var value = all.length === 1 ? all[0].normalize("NFC").trim().toLowerCase() : "";
+      var value = all.length === 1
+        ? all[0].normalize("NFC").replace(TRIM, "").toLowerCase()
+        : "";
       values.push(utf8Length(value) > 100 ? "" : value);
     }
     return values;
@@ -132,14 +130,12 @@
     return 250 + (value % 501);
   }
 
-  // "initial" is the one automatic view -- at script execution or prerender
-  // activation -- and the only kind that may carry a referrer hostname.
+  // "initial" is the only kind that may carry a referrer hostname.
   function attempt(kind) {
     var gate = privacyGate();
     if (gate === null) return;
 
-    // Prerendering defers every attempt into one at activation; a document
-    // that is never activated records nothing.
+    // Prerendering defers every attempt into one at activation.
     if (doc.prerendering === true) {
       if (!awaitingActivation) {
         awaitingActivation = true;
@@ -153,7 +149,8 @@
     var campaigns = campaignValues(win.location.search);
 
     // Pathname plus campaigns, so a hash-only change is not a new route.
-    var key = [path].concat(campaigns).join("\n");
+    // JSON, not a join: a campaign value may contain any delimiter.
+    var key = JSON.stringify([path].concat(campaigns));
     if (key === routeKey) return;
 
     var payload = { v: 1, site: siteKey, event_id: eventID(), path: path };
@@ -190,6 +187,9 @@
   }
 
   function transmit(body, isRetry) {
+    // A request belongs to the generation that started it, so one settling
+    // after a freeze cannot replay behind the restored document's own view.
+    var epoch = generation;
     var controller = new win.AbortController();
     var timedOut = false;
     var timer = win.setTimeout(function () {
@@ -197,8 +197,7 @@
       controller.abort();
     }, 5000);
 
-    // mode "cors" is mandatory: under "no-cors" the required no-referrer
-    // policy can serialize the origin as opaque null, which is rejected.
+    // mode "cors" is mandatory: "no-cors" can serialize the origin as null.
     var options = {
       method: "POST",
       mode: "cors",
@@ -215,38 +214,35 @@
         win.clearTimeout(timer);
         // Only a visible 429 or 503 earns the one retry.
         if (!isRetry && (response.status === 429 || response.status === 503)) {
-          scheduleRetry(body);
+          scheduleRetry(body, epoch);
         }
       },
       function () {
         win.clearTimeout(timer);
-        // A generic TypeError -- opaque CORS failure, rejected origin,
-        // dropped connection -- is final: retrying would double exactly the
-        // rejected traffic. Only this script's own bound retries, hence the
-        // flag rather than an error name.
-        if (!isRetry && timedOut) scheduleRetry(body);
+        // A generic TypeError is final: retrying an opaque CORS failure
+        // would double exactly the traffic the collector already refused.
+        if (!isRetry && timedOut) scheduleRetry(body, epoch);
       }
     );
   }
 
-  function scheduleRetry(body) {
-    if (!active()) return;
-    retryTimer = win.setTimeout(function () {
-      retryTimer = 0;
+  function scheduleRetry(body, epoch) {
+    if (!active(epoch)) return;
+    var timer = win.setTimeout(function () {
+      retryTimers.delete(timer);
       // Byte-identical body and event UUID: a duplicate is a server no-op.
-      if (active()) transmit(body, true);
+      if (active(epoch)) transmit(body, true);
     }, retryDelay());
+    retryTimers.add(timer);
   }
 
-  function active() {
-    return !frozen && doc.defaultView !== null;
+  function active(epoch) {
+    return epoch === generation && doc.defaultView !== null;
   }
 
   // No history API, router, link, or observer is patched.
   win.addEventListener("pageshow", function (event) {
-    frozen = false;
-    // Script execution already owns the initial view, so only a bfcache
-    // restoration counts; resetting the route key lets the same path recount.
+    // Only a bfcache restoration counts; resetting the route key recounts.
     if (event && event.persisted === true) {
       routeKey = null;
       attempt("restore");
@@ -254,19 +250,17 @@
   });
 
   win.addEventListener("pagehide", function () {
-    // A destroyed or frozen document stops scheduling; a keepalive request
-    // already handed to the browser is left alone.
-    frozen = true;
-    if (retryTimer !== 0) {
-      win.clearTimeout(retryTimer);
-      retryTimer = 0;
-    }
+    // Ends the generation: pending retries drop, in-flight ones cannot add.
+    generation++;
+    retryTimers.forEach(function (timer) { win.clearTimeout(timer); });
+    retryTimers.clear();
   });
 
-  // One command function with a read-only integer marker, installed before
-  // the automatic view. Unknown commands and arguments are no-ops.
+  // One command function with a read-only integer marker, installed before the
+  // automatic view. Only the exact documented call runs; an unknown command or
+  // an extra argument is a silent no-op.
   var pacapulse = function (command) {
-    if (command === "pageview") attempt("spa");
+    if (arguments.length === 1 && command === "pageview") attempt("spa");
   };
   Object.defineProperty(pacapulse, "protocolVersion", { value: 1, enumerable: true });
   win.pacapulse = pacapulse;

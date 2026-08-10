@@ -170,3 +170,111 @@ test("each route attempt gets its own retry budget", async () => {
   assert.equal(page.fetches.length, 4, "a new route attempt inherited the previous one's spent retry");
   assert.notEqual(JSON.parse(page.fetches[3].body).event_id, JSON.parse(page.fetches[1].body).event_id);
 });
+
+// A frozen-then-restored document is the case the single `frozen` flag used
+// to get wrong. The restoration has already re-run the privacy gate and taken
+// its own fresh view; a request from before the freeze that only settles
+// afterwards must not replay behind it, and must certainly not replay after
+// the visitor turned GPC or DNT on while the page sat in the bfcache.
+for (const [name, signal] of [
+  ["GPC", (page) => { page.navigator.globalPrivacyControl = true; }],
+  ["DNT", (page) => { page.navigator.doNotTrack = "1"; }],
+  ["no privacy change", () => {}]
+]) {
+  test(`a late 503 from before the freeze is not replayed (${name})`, async () => {
+    const page = await pageWithRequest({ url: "https://shop.example/a" });
+    const preFreeze = page.fetches[0].body;
+
+    page.pagehide();
+    signal(page);
+    page.pageshow(true);
+    await settle();
+
+    // The pre-freeze request settles only now, long after the restoration.
+    await page.respond(0, 503);
+    await runRetryTimer(page);
+
+    const replays = page.fetches.filter((call, index) => index > 0 && call.body === preFreeze);
+    assert.equal(replays.length, 0, "a pre-freeze request replayed after restoration");
+  });
+
+  test(`a late own-timeout from before the freeze is not replayed (${name})`, async () => {
+    const page = await pageWithRequest({ url: "https://shop.example/a" });
+    const preFreeze = page.fetches[0].body;
+
+    page.pagehide();
+    signal(page);
+    page.pageshow(true);
+    await settle();
+
+    // Frozen timers resume: the pre-freeze five-second bound trips now.
+    await page.timeOut();
+    await runRetryTimer(page);
+
+    const replays = page.fetches.filter((call, index) => index > 0 && call.body === preFreeze);
+    assert.equal(replays.length, 0, "a timed-out pre-freeze request replayed after restoration");
+  });
+}
+
+// The restored document is a full participant: its own attempt keeps the one
+// retry the protocol allows it.
+test("the restored view still gets its own single retry", async () => {
+  const page = await pageWithRequest({ url: "https://shop.example/a" });
+  page.pagehide();
+  page.pageshow(true);
+  await settle();
+
+  assert.equal(page.fetches.length, 2, "the restoration did not take its own view");
+  const restored = page.fetches[1].body;
+
+  await page.respond(1, 503);
+  await runRetryTimer(page);
+  assert.equal(page.fetches.length, 3);
+  assert.equal(page.fetches[2].body, restored);
+
+  await page.respond(2, 503);
+  await runRetryTimer(page);
+  assert.equal(page.fetches.length, 3, "the restored view retried more than once");
+});
+
+// One tracked timer handle used to mean pagehide could only cancel the most
+// recently scheduled retry.
+test("pagehide cancels every pending retry, not just the last", async () => {
+  const page = await pageWithRequest({ url: "https://shop.example/a" });
+  page.navigate("https://shop.example/b").pageview();
+  await settle();
+  assert.equal(page.fetches.length, 2);
+
+  await page.respond(0, 503);
+  await page.respond(1, 429);
+  assert.equal(page.clock.pending.length, 2, "both attempts should have a retry pending");
+
+  page.pagehide();
+  assert.deepEqual(page.clock.pending, [], "a pending retry survived pagehide");
+
+  await runRetryTimer(page);
+  assert.equal(page.fetches.length, 2, "a cancelled retry still fired");
+});
+
+// The cancellation sweep and the generation check are two independent guards,
+// and this exercises the second one. Two attempts are pending, which is what
+// a single tracked timer handle could not clear; whatever the sweep misses,
+// the generation the timer was armed in is what stops it firing.
+test("a retry armed before the freeze cannot fire after restoration", async () => {
+  const page = await pageWithRequest({ url: "https://shop.example/a" });
+  page.navigate("https://shop.example/b").pageview();
+  await settle();
+  assert.equal(page.fetches.length, 2);
+
+  await page.respond(0, 503);
+  await page.respond(1, 503);
+  const preFreeze = [page.fetches[0].body, page.fetches[1].body];
+
+  page.pagehide();
+  page.pageshow(true);
+  await settle();
+
+  await runRetryTimer(page);
+  const replays = page.fetches.filter((call, index) => index > 1 && preFreeze.includes(call.body));
+  assert.equal(replays.length, 0, "a pre-freeze retry fired after restoration");
+});
