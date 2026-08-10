@@ -6,6 +6,12 @@
 GO ?= go
 GOLANGCI_LINT ?= golangci-lint
 DOCKER ?= docker
+# Node validates the browser beacon: it runs the asset's test suite and
+# measures its Brotli size, which Go's standard library cannot. It is a
+# development tool only and never enters the binary or the image.
+NODE ?= node
+NODE_MAJOR := 24
+BEACON_TESTS := 'internal/beacon/jstest/*.test.mjs'
 
 BINARY := pacapulse
 PACKAGE := github.com/mtrenker/pacapulse
@@ -27,7 +33,7 @@ PACAPULSE_LOG_LEVEL ?= info
 PACAPULSE_LOG_FORMAT ?= text
 
 .DEFAULT_GOAL := help
-.PHONY: help fmt fmt-check vet lint test test-race cover build run image smoke verify clean
+.PHONY: help fmt fmt-check vet lint test test-race test-beacon cover build run image smoke verify clean
 
 help: ## List the available commands
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -56,6 +62,15 @@ test: ## Run the tests
 test-race: ## Run the tests under the race detector
 	$(GO) test -race ./...
 
+test-beacon: ## Run the browser beacon's Node tests and size gate
+	@version=$$($(NODE) --version 2>/dev/null); \
+	case "$$version" in \
+		v$(NODE_MAJOR).*) ;; \
+		"") echo "Node $(NODE_MAJOR) is required for the beacon tests; see docs/development.md"; exit 1 ;; \
+		*) echo "Node $(NODE_MAJOR) is required for the beacon tests, found $$version; see docs/development.md"; exit 1 ;; \
+	esac
+	$(NODE) --test $(BEACON_TESTS)
+
 cover: ## Run the tests and report coverage per package
 	$(GO) test -coverprofile=coverage.out ./...
 	$(GO) tool cover -func=coverage.out
@@ -77,7 +92,7 @@ image: ## Build the production container image
 smoke: ## Build the image and smoke-test it as a container
 	IMAGE=$(IMAGE) scripts/smoke-test.sh
 
-verify: fmt-check vet lint test-race ## Run every check CI runs for a pull request
+verify: fmt-check vet lint test-race test-beacon ## Run every check CI runs for a pull request
 
 clean: ## Remove build output
 	rm -rf bin coverage.out

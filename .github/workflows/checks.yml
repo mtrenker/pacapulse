@@ -26,6 +26,15 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Node is a validation tool only: it runs the browser beacon's test
+      # suite and measures its Brotli size, which the Go standard library
+      # cannot. It is pinned by `.node-version` and never reaches the binary,
+      # the container image, or the runtime.
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+
       # Compares the whole tree against the empty tree, so every tracked file is
       # checked for trailing whitespace and conflict markers, not just a diff.
       - name: Check the tree for whitespace errors
@@ -44,6 +53,11 @@ jobs:
 
       - name: Test with the race detector
         run: go test -race -shuffle=on ./...
+
+      # Runs the fixture-driven browser tests and measures the exact embedded
+      # asset as source, gzip, and Brotli bytes against its size budget.
+      - name: Test the browser beacon
+        run: make test-beacon
 
       - name: Build
         run: make build

@@ -1,15 +1,22 @@
 # Development
 
 This document covers how to configure, run, test, and package the PacaPulse
-binary, the SQLite lifecycle, the strict public page-view collector, and the
-internal page-view storage contract. Reporting, retention, backup,
-authentication, deployment, and the browser asset do not exist yet.
+binary, the SQLite lifecycle, the strict public page-view collector, the
+browser beacon it serves, and the internal page-view storage contract.
+Reporting, retention, backup, authentication, and deployment do not exist yet.
 
 ## Prerequisites
 
 - Go 1.26.5 or newer. The module targets Go 1.26; CI and the container build
   both pin 1.26.5.
 - GNU Make.
+- Node 24, for `make test-beacon` — which `make verify` runs. The version is
+  pinned in `.node-version` and CI installs exactly that one. Node is a
+  validation tool: it runs the browser asset's test suite and measures its
+  Brotli size, which Go's standard library cannot. It never enters the binary,
+  the container image, or the runtime, and the repository has no
+  `package.json`, no npm dependencies, and no lockfile. Point the Makefile at
+  a specific interpreter with `make test-beacon NODE=/path/to/node`.
 - Docker, for the container build and the smoke test only.
 - `golangci-lint` v2 for `make lint`.
 
@@ -26,6 +33,7 @@ Run `make` on its own for the list. The ones that matter day to day:
 | `make lint` | Run `golangci-lint` |
 | `make test` | Run the tests |
 | `make test-race` | Run the tests under the race detector |
+| `make test-beacon` | Run the browser asset's Node tests and its size gate |
 | `make cover` | Report per-package coverage |
 | `make build` | Build `bin/pacapulse` with the version stamped in |
 | `make image` | Build the production container image |
@@ -33,7 +41,8 @@ Run `make` on its own for the list. The ones that matter day to day:
 | `make verify` | Everything a pull request is checked with, minus the image |
 
 `make verify` is the gate to run before pushing: it is `fmt-check`, `vet`,
-`lint`, and `test-race` in one command, matching the pull-request workflow.
+`lint`, `test-race`, and `test-beacon` in one command, matching the
+pull-request workflow.
 
 ### Starting the service
 
@@ -98,6 +107,7 @@ names rather than contents.
 | --- | --- |
 | `GET /healthz` | Liveness. `200 {"status":"alive"}` for as long as the process is serving. Never checks dependencies. |
 | `GET /readyz` | Readiness. `200 {"status":"ready"}`, or `503` with `{"status":"draining"}` during termination and `{"status":"unready","failed":["…"]}` when a dependency check fails. The database reports itself as `database`. |
+| `GET /beacon/v1.js` | The public browser asset. Cacheable, validated, cross-origin readable, and offered as identity or gzip. `HEAD` works; every other method is an empty `405`. |
 | `POST /api/v1/pageviews` | Strict browser page-view collection. Every response is empty and non-cacheable; accepted CORS is reflected only after site and origin approval. |
 
 The split matters operationally: a failing dependency must take the instance out
@@ -126,6 +136,148 @@ traffic. The rule, enforced by tests in `internal/httpapi` and `internal/app`:
   the default log. Responses of `500` and above log at `error`.
 - `net/http`'s own transport error log — which can embed a peer address — is
   routed at `debug` for the same reason.
+
+## The browser beacon
+
+`internal/beacon/beacon.js` is the public asset served at `GET /beacon/v1.js`.
+It is embedded with `go:embed` and served **byte for byte**: there is no build
+step, bundler, minifier, or template between the file in the repository and
+the script a tracked page executes, and a test compares the served body with
+the file on disk to keep it that way. That is what makes the beacon a
+reviewable privacy boundary instead of a build artifact — and it is why the
+asset is a classic script written in plain ES5-shaped JavaScript rather than
+something that would need compiling.
+
+The normative behaviour is in
+[the collection protocol](architecture/collection-protocol.md). What follows is
+the reasoning that does not fit inside the asset's size budget.
+
+### Installing it
+
+```html
+<script
+  defer
+  referrerpolicy="no-referrer"
+  src="https://pulse.example.com/beacon/v1.js"
+  data-site="pp_q3D9xK2mW7cN4rT8vB6yH1sL5aF0jPzQ">
+</script>
+```
+
+Everything configurable comes from that tag. The collection key is the
+`data-site` attribute, and the collector origin is derived from the resolved
+`src` — the asset never hard-codes a hostname, so a self-hosted installation
+works without a rebuild. A missing `document.currentScript`, a malformed key,
+or an unusable `src` stops the script silently before it installs anything.
+
+A site whose stored `collect_dnt` policy is enabled additionally receives
+`data-collect-dnt="true"`. Only that exact string is an override, and all it
+does is add `"dnt": true` to the body; the server's own policy still decides.
+
+Tracked sites that use CSP need both directives:
+
+```http
+Content-Security-Policy: script-src 'self' https://pulse.example.com; connect-src 'self' https://pulse.example.com
+```
+
+The asset uses no inline script, no `eval`, no `new Function`, and no dynamic
+import, so it is compatible with a policy that forbids all of those. A site
+using `'strict-dynamic'` must give the beacon tag its own nonce or load it
+from an already trusted script: a host allowlist alone is ignored there.
+
+Explicit SPA route changes call `window.pacapulse?.("pageview")` after the
+router has committed and `location` reflects the new route. The beacon
+deliberately patches no history API, router, link, or observer.
+
+### Why the privacy gate runs first
+
+GPC and default DNT suppression happen before the script generates a UUID,
+reads `location.pathname`, `location.search`, or `document.referrer`, or
+touches the network. A gate that only skipped the `fetch` would still have
+built a page-view record in a document that asked not to be measured, and the
+ordering would be invisible to a reviewer. The Node tests prove the ordering
+rather than the outcome: suppressed cases run with each of those reads
+replaced by a throwing mock, so a gate that ran one step too late fails
+loudly.
+
+The same gate re-runs for prerender activation, bfcache restoration, and every
+explicit SPA call, because a visitor can change the setting mid-document.
+
+### Why a generic failure is never retried
+
+The beacon retries exactly once, and only for its own five-second timeout or a
+CORS-visible `429`/`503`. Every silent rejection path — unknown key, disabled
+site, rejected origin, early body or media-type refusal, instance-level rate
+limiting — reaches the browser as an opaque `TypeError` that reveals nothing
+about which one it was. Retrying those would double exactly the traffic the
+collector already decided not to accept, and would invalidate the abuse-rate
+calculations the fixed token buckets are sized against. The timeout is
+recognised by the script's own flag rather than by an `AbortError` name,
+because browsers also use that name for aborts the script did not cause.
+
+### The size budget
+
+The protocol caps the asset at 12 KiB uncompressed and 4 KiB compressed, and
+`make verify` measures the exact embedded bytes three ways:
+
+| Representation | Budget | Measured by |
+| --- | --- | --- |
+| Source | 12 KiB | `internal/beacon` Go test and the Node size test |
+| gzip (level 9) | 4 KiB | `internal/beacon` Go test and the Node size test |
+| Brotli (quality 11) | 4 KiB | the Node size test |
+
+Brotli is measured in Node because Go's standard library has no Brotli
+encoder. The service itself only offers identity and gzip, which is what
+ordinary `Accept-Encoding` negotiation needs; the Brotli figure is a budget
+check on the asset, not a promise about the wire.
+
+The budget is tight enough that prose has to earn its place in the file. When
+a comment explains something a reader needs but the budget cannot hold, it
+belongs in this document instead — the size test prints the exact remaining
+headroom on every run.
+
+### Serving it
+
+`internal/beacon` computes both representations and both validators once at
+construction; the asset cannot change while the process runs, so compressing
+per request would only spend CPU on a response that caches for an hour.
+
+```text
+Content-Type: application/javascript; charset=utf-8
+Cache-Control: public, max-age=3600, stale-while-revalidate=86400
+ETag: <content validator>
+Vary: Accept-Encoding
+X-Content-Type-Options: nosniff
+Cross-Origin-Resource-Policy: cross-origin
+```
+
+The two representations carry **different** strong validators. They differ
+byte for byte, so sharing one is how a shared cache ends up answering a gzip
+request with identity bytes labelled as compressed. Negotiation follows RFC
+9110: identity is acceptable unless `identity;q=0` or a `*;q=0` without a more
+specific entry removes it, gzip is only sent when it was asked for by name or
+through a positive wildcard, quality values decide ties in the client's
+favour, and a request that accepts nothing this handler can produce gets an
+empty `406`.
+
+### Testing it
+
+The browser tests are `node --test` files under `internal/beacon/jstest/`,
+using only Node's built-in runtime — `node:test`, `node:assert`, `node:vm`,
+and `node:zlib`. There is no test framework, no DOM library, and no npm
+dependency of any kind.
+
+`harness.mjs` builds a fake window and evaluates the **real asset** in a
+`node:vm` context. Everything the beacon can observe is deterministic: a fake
+clock instead of timers, a counted and controllable Web Crypto, and captured
+`fetch` calls a test resolves or rejects by hand. Because every privacy-
+sensitive read is counted, a test can assert what did *not* happen.
+
+`extraction.test.mjs` is generated from
+`docs/architecture/collection-protocol-fixtures.json` — the same file the Go
+collector tests consume. Adding a `browser_extraction` case to that file adds
+a case here without editing the test, which is the point: a case the two
+implementations disagree about has to be resolved in the protocol rather than
+in one side's test file.
 
 ## Storage
 
@@ -422,6 +574,9 @@ guarantee, not just that it starts:
   binary;
 - the exported filesystem contains the binary and no Go toolchain;
 - both health endpoints answer over a published port;
+- `GET /beacon/v1.js` returns the embedded asset with every normative header,
+  the same bytes under gzip negotiation, a `304` for its own validator, and a
+  `405` for `POST`;
 - the OCI health check reaches `healthy`;
 - missing configuration exits `2` naming the variable, and an invalid value is
   reported without being echoed;
@@ -441,8 +596,9 @@ Two workflows, split so that untrusted code never runs with credentials that can
 publish:
 
 - `.github/workflows/ci.yml` runs on pull requests and on pushes to `main`. It
-  runs formatting, `go vet`, `golangci-lint`, race-enabled tests, and a
-  container build plus smoke test. It uses the `pull_request` event, so a fork
+  runs formatting, `go vet`, `golangci-lint`, race-enabled tests, the browser
+  beacon's Node tests and size gate, and a container build plus smoke test. It
+  uses the `pull_request` event, so a fork
   contribution runs with a read-only token and no access to secrets, and it
   never pushes an image.
 - `.github/workflows/publish.yml` runs only on pushes to `main`, which cannot be
@@ -479,7 +635,8 @@ service.
 
 ```text
 cmd/pacapulse      process entry point: flags, exit codes, signal handling
-internal/app       wiring of config, storage, collector, health, router, and server
+internal/app       wiring of config, storage, collector, beacon, health, router, server
+internal/beacon    the embedded browser asset, its serving contract, and its tests
 internal/collector strict page-view validation, privacy, transient HMACs, and limits
 internal/config    environment loading and fail-fast validation
 internal/health    liveness and readiness state, dependency check registry

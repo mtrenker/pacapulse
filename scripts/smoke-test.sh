@@ -4,9 +4,10 @@
 #
 # It proves the properties the image is supposed to guarantee rather than just
 # that it starts: non-root execution, no build toolchain, working liveness and
-# readiness endpoints, a working OCI health check, fail-fast configuration
-# validation, an owner-only database created on a mounted data volume, and a
-# clean exit on SIGTERM.
+# readiness endpoints, the embedded browser beacon with its cache, security,
+# and compression contract, a working OCI health check, fail-fast
+# configuration validation, an owner-only database created on a mounted data
+# volume, and a clean exit on SIGTERM.
 #
 # Usage:
 #   scripts/smoke-test.sh              # build the image, then test it
@@ -45,7 +46,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for tool in docker curl tar; do
+for tool in docker curl tar gzip cmp; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool is required but not installed"
 done
 
@@ -160,6 +161,63 @@ pass "GET /healthz returned 200 and reported the process alive"
 probe /readyz || fail "readiness endpoint did not become available within ${STARTUP_TIMEOUT}s"
 grep -q '"status":"ready"' "$WORKDIR/body.json" || fail "unexpected readiness body: $(cat "$WORKDIR/body.json")"
 pass "GET /readyz returned 200 and reported the instance ready"
+
+step "Serving the browser beacon"
+# The asset is embedded in the binary, so this proves the shipped image
+# carries it and answers with the contract a tracked page depends on.
+curl --fail --silent --show-error --max-time 5 \
+  --header 'Accept-Encoding: identity' \
+  --dump-header "$WORKDIR/beacon.headers" \
+  --output "$WORKDIR/beacon.js" \
+  "${base}/beacon/v1.js" || fail "GET /beacon/v1.js failed"
+
+for expected in \
+  'content-type: application/javascript; charset=utf-8' \
+  'cache-control: public, max-age=3600, stale-while-revalidate=86400' \
+  'vary: Accept-Encoding' \
+  'x-content-type-options: nosniff' \
+  'cross-origin-resource-policy: cross-origin'
+do
+  if ! tr -d '\r' < "$WORKDIR/beacon.headers" | grep -qiF "$expected"; then
+    fail "the beacon response is missing '$expected'"
+  fi
+done
+pass "GET /beacon/v1.js returned the asset with every normative header"
+
+etag="$(tr -d '\r' < "$WORKDIR/beacon.headers" | awk 'tolower($1) == "etag:" {print $2}')"
+[ -n "$etag" ] || fail "the beacon response carries no ETag"
+
+grep -q 'PacaPulse browser beacon' "$WORKDIR/beacon.js" \
+  || fail "the served asset is not the PacaPulse beacon"
+for forbidden in 'document.cookie' 'localStorage' 'Math.random' 'sendBeacon' 'sourceMappingURL'; do
+  if grep -qF "$forbidden" "$WORKDIR/beacon.js"; then
+    fail "the served asset contains '$forbidden'"
+  fi
+done
+pass "the served asset is the transparent beacon source, with no forbidden construct"
+
+curl --fail --silent --show-error --max-time 5 \
+  --header 'Accept-Encoding: gzip' \
+  --dump-header "$WORKDIR/beacon.gzip.headers" \
+  --output "$WORKDIR/beacon.js.gz" \
+  "${base}/beacon/v1.js" || fail "gzip-negotiated GET /beacon/v1.js failed"
+tr -d '\r' < "$WORKDIR/beacon.gzip.headers" | grep -qi '^content-encoding: gzip$' \
+  || fail "the service did not offer gzip for Accept-Encoding: gzip"
+gzip --decompress --stdout "$WORKDIR/beacon.js.gz" > "$WORKDIR/beacon.gunzip.js" \
+  || fail "the gzip representation does not decode"
+cmp --silent "$WORKDIR/beacon.js" "$WORKDIR/beacon.gunzip.js" \
+  || fail "the gzip representation differs from the identity representation"
+pass "gzip negotiation returns the same asset, compressed"
+
+conditional="$(curl --silent --show-error --max-time 5 --output /dev/null --write-out '%{http_code}' \
+  --header 'Accept-Encoding: identity' --header "If-None-Match: $etag" "${base}/beacon/v1.js")"
+[ "$conditional" = "304" ] || fail "a conditional GET returned $conditional, want 304"
+pass "a conditional GET with the served validator returned 304"
+
+rejected="$(curl --silent --show-error --max-time 5 --output /dev/null --write-out '%{http_code}' \
+  --request POST "${base}/beacon/v1.js")"
+[ "$rejected" = "405" ] || fail "POST /beacon/v1.js returned $rejected, want 405"
+pass "POST /beacon/v1.js is rejected with 405"
 
 step "Waiting for the OCI health check"
 deadline=$((SECONDS + HEALTH_TIMEOUT))
