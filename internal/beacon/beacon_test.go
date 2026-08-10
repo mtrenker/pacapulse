@@ -3,6 +3,8 @@ package beacon_test
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -128,6 +130,30 @@ func TestRepresentationsHaveDistinctValidators(t *testing.T) {
 	}
 	if identity == compressed {
 		t.Errorf("both representations use validator %q", identity)
+	}
+}
+
+// TestValidatorIsDerivedFromTheBodyItLabels is the strong-validator rule: an
+// ETag identifies the exact bytes sent. Deriving both from the source and
+// distinguishing them with a suffix would look right and still be wrong — the
+// gzip bytes are not a function of the source alone, so a compressor change
+// would serve different bytes under an unchanged validator and every cache
+// holding the old copy would keep it.
+func TestValidatorIsDerivedFromTheBodyItLabels(t *testing.T) {
+	t.Parallel()
+
+	for name, encoding := range map[string]string{"identity": "identity", "gzip": "gzip"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			resp := request(t, http.MethodGet, encoding, nil)
+			digest := sha256.Sum256(resp.Body.Bytes())
+			want := `"` + hex.EncodeToString(digest[:16]) + `"`
+
+			if got := resp.Header().Get("ETag"); got != want {
+				t.Errorf("ETag = %q, want %q derived from the %d served bytes", got, want, resp.Body.Len())
+			}
+		})
 	}
 }
 

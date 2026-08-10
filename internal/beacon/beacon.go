@@ -59,12 +59,6 @@ type representation struct {
 
 // NewHandler prepares both representations of the embedded asset.
 func NewHandler() *Handler {
-	digest := sha256.Sum256(source)
-	// Half the digest is 64 bits of collision resistance over a file that
-	// changes when the repository does; a full one only lengthens every
-	// response and every conditional request.
-	validator := hex.EncodeToString(digest[:16])
-
 	var compressed bytes.Buffer
 	writer, err := gzip.NewWriterLevel(&compressed, gzip.BestCompression)
 	if err != nil {
@@ -80,12 +74,29 @@ func NewHandler() *Handler {
 	}
 
 	return &Handler{
-		// Distinct validators: the two representations differ byte for byte,
-		// so a shared strong ETag would let a cache answer a gzip request
-		// with identity bytes labelled as compressed.
-		identity: representation{body: source, etag: `"` + validator + `"`},
-		gzipped:  representation{body: compressed.Bytes(), etag: `"` + validator + `-gzip"`},
+		identity: newRepresentation(source),
+		gzipped:  newRepresentation(compressed.Bytes()),
 	}
+}
+
+// newRepresentation pairs a body with a strong validator derived from that
+// body.
+//
+// Each representation is hashed on its own rather than sharing the source's
+// digest under distinguishing suffixes. A strong ETag identifies the exact
+// bytes sent, and the gzip bytes are not a function of the source alone: a Go
+// release that changes compress/flate's output would otherwise serve
+// different bytes under an unchanged validator, and every cache holding the
+// old copy would keep it. Hashing what is actually sent makes that impossible
+// by construction, and it still gives the two representations the distinct
+// validators a shared cache needs to tell them apart.
+//
+// Half the digest is 64 bits of collision resistance over a file that changes
+// only when the repository does; a full one only lengthens every response and
+// every conditional request.
+func newRepresentation(body []byte) representation {
+	digest := sha256.Sum256(body)
+	return representation{body: body, etag: `"` + hex.EncodeToString(digest[:16]) + `"`}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
