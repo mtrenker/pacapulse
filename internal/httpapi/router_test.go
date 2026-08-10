@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mtrenker/pacapulse/internal/beacon"
 	"github.com/mtrenker/pacapulse/internal/health"
 	"github.com/mtrenker/pacapulse/internal/httpapi"
 	"github.com/mtrenker/pacapulse/internal/logging"
@@ -239,5 +240,59 @@ func TestSuccessfulRequestsAreQuietByDefault(t *testing.T) {
 
 	if strings.Contains(logs.String(), "request served") {
 		t.Errorf("successful probe was logged at the default level:\n%s", logs.String())
+	}
+}
+
+// TestBeaconAssetIsRoutedWithoutLoggingRequestData registers the real asset
+// handler on the router. The route pattern is a constant, so the privacy
+// guarantee the middleware provides has to hold here too.
+func TestBeaconAssetIsRoutedWithoutLoggingRequestData(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	logger := logging.New(&logs, "json", slog.LevelDebug)
+	handler := httpapi.NewRouter(httpapi.Options{
+		Logger: logger,
+		Health: health.NewRegistry(),
+		Beacon: beacon.NewHandler(),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, httpapi.BeaconPath, nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	req.Header.Set("Referer", "https://tracked-site.example/private/page")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (very identifying)")
+	req.RemoteAddr = "203.0.113.42:54321"
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if got := recorder.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Errorf("Content-Encoding = %q, want gzip", got)
+	}
+
+	written := logs.String()
+	if !strings.Contains(written, httpapi.BeaconPath) {
+		t.Errorf("log omits the matched route pattern:\n%s", written)
+	}
+	for _, forbidden := range []string{"tracked-site.example", "Mozilla/5.0", "203.0.113.42"} {
+		if strings.Contains(written, forbidden) {
+			t.Errorf("log contains request data %q:\n%s", forbidden, written)
+		}
+	}
+}
+
+// TestBeaconRouteIsOmittedWhenUnwired keeps isolated probe tests lightweight
+// and matches how the collector route behaves.
+func TestBeaconRouteIsOmittedWhenUnwired(t *testing.T) {
+	t.Parallel()
+
+	handler, _ := newRouter(t, health.NewRegistry())
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, httpapi.BeaconPath, nil))
+
+	if recorder.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", recorder.Code, http.StatusNotFound)
 	}
 }

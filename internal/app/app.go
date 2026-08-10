@@ -11,6 +11,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/mtrenker/pacapulse/internal/beacon"
 	"github.com/mtrenker/pacapulse/internal/collector"
 	"github.com/mtrenker/pacapulse/internal/config"
 	"github.com/mtrenker/pacapulse/internal/health"
@@ -63,6 +64,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		Logger:    logger,
 		Health:    registry,
 		Collector: pageViews,
+		Beacon:    beacon.NewHandler(),
 	})
 
 	srv := server.New(server.Options{

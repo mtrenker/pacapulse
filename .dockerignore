@@ -6,3 +6,6 @@
 !internal/
 !go.mod
 !go.sum
+# Node is a validation tool, never a runtime dependency. The browser asset's
+# test suite has no business in the image build context.
+internal/beacon/jstest/

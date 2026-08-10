@@ -4,7 +4,7 @@ Lightweight, privacy-first web analytics for multiple sites.
 
 > [!IMPORTANT]
 > PacaPulse is under active MVP development. Its service, SQLite ingestion
-> foundation, and strict page-view collector exist, but its browser asset,
+> foundation, strict page-view collector, and browser beacon exist, but its
 > administration, reports, and production deployment are not complete.
 
 ## Why PacaPulse?
@@ -47,16 +47,25 @@ The repository currently contains the service baseline and its storage
 foundation: a Go binary that loads and validates its configuration, creates and
 migrates its SQLite database under an exclusive single-writer lock, and can
 atomically record sanitized page views through an internal bounded writer. It
-serves the strict `POST /api/v1/pageviews` boundary plus Kubernetes-shaped
-liveness and readiness probes and shuts down gracefully. The browser asset and
-reports are not implemented yet.
+serves the privacy-first browser beacon at `GET /beacon/v1.js` and the strict
+`POST /api/v1/pageviews` boundary, plus Kubernetes-shaped liveness and
+readiness probes, and shuts down gracefully. Site administration, generated
+installation snippets, and reports are not implemented yet.
 
 ```console
 $ export PACAPULSE_VISITOR_SECRET="$(openssl rand -base64 32)"
 $ PACAPULSE_BASE_URL=http://localhost:8080 go run ./cmd/pacapulse
 $ curl http://localhost:8080/healthz
 {"status":"alive"}
+$ curl --silent --head http://localhost:8080/beacon/v1.js | head -n 2
+HTTP/1.1 200 OK
+Cache-Control: public, max-age=3600, stale-while-revalidate=86400
 ```
+
+The beacon is deliberately transparent and deliberately blockable: it is
+served byte for byte from
+[`internal/beacon/beacon.js`](internal/beacon/beacon.js), with no build step
+in between, so what you read is what a tracked page runs.
 
 The database is created under `./data` by default; `PACAPULSE_DATA_DIR` moves
 it. `make` lists the development commands, and `make verify` runs everything a
